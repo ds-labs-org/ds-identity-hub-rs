@@ -3,7 +3,8 @@
 **Status:** Bootstrap, working end to end against the real TCK (see "DCP TCK
 conformance snapshot" below). Not yet integrated with a live dataspace
 control plane, a real key-management/HSM backend, or a persistent store.
-**Date:** 2026-09-19
+**Date:** 2026-09-20 (`ds-dcp-core-rs` dependency bump; see "Provenance"
+below — TCK snapshot re-run and unchanged)
 
 This file records the scope and design decisions behind this project's
 bootstrap, why each was made, and an honest accounting of what actually
@@ -93,10 +94,50 @@ JSON schemas and examples (cross-checked against
 
 Similarly, `identity-hub-core::identity::ServiceIdentity` builds its own DID
 documents rather than reusing `ds-dcp-core-rs::DcpKeyPair::did_document`,
-because the latter omits the `authentication`/`assertionMethod`/
+because the latter omitted the `authentication`/`assertionMethod`/
 `capabilityInvocation` verification-relationship arrays the DCP spec (and
 the real TCK's `TestFixtures.assertVerificationRelationship`) requires — see
 that module's doc comment for the full argument.
+
+**2026-09-20 update:** `ds-dcp-core-rs` was bumped to commit `931c6719`
+(from `d55b62d7`), which fixes exactly that gap — `DcpKeyPair::did_document`
+now emits real `authentication`/`assertionMethod`/`capabilityInvocation`
+arrays, backed by a genuine test
+(`did_document_carries_verification_relationships`). This was re-evaluated
+as a candidate to delete `ServiceIdentity`'s own hand-rolled
+`did_document` and delegate to the upstream one, but it is **not** a clean,
+equivalent swap, so the duplication stays:
+
+- `DcpKeyPair::did_document`'s `@context` is just
+  `["https://www.w3.org/ns/did/v1"]` — it never picked up the DCP JSON-LD
+  context (`https://w3id.org/dspace-dcp/v1.0/dcp.jsonld`) that
+  `ServiceIdentity::did_document` includes (`DID_CONTEXT`), which the DCP
+  spec's own examples carry for a document with a
+  `CredentialService`/`IssuerService` entry.
+- `DcpKeyPair::did_document`'s `service` entries omit the `id` field
+  (`ServiceIdentity::did_document` emits `"id": "<did>#<type>"` per entry);
+  upstream's own consumer (`HolderIdentity` in `ds-catalog-broker-rs`'s
+  lineage) never needed one, but this project's shape does.
+- The signature also differs (`&[(String, String)]` vs. this crate's
+  `&[(&str, &str)]`), a minor friction on top of the two shape gaps above.
+
+Swapping in the upstream function as-is would silently drop the DCP
+JSON-LD context and the per-service `id` from every DID document this
+project serves — exactly the kind of TCK-scoped shape this bootstrap has
+been careful to get byte-for-byte right (see "Why this project defines its
+own message types" above for the same reasoning applied to messages
+instead of DID documents). Since nothing here indicates the TCK's own
+18-passing baseline currently depends on either field, this was not
+re-verified against a live TCK run purely to prove a negative; the
+existing `dcp_tck` conformance run (unchanged by this dependency bump —
+see the snapshot below) is the standing evidence this hand-rolled path
+still works. `ServiceIdentity::did_document` therefore stays as its own,
+DCP-shape-complete implementation; only the verification-relationship
+*values* it computes now agree with what upstream independently computes,
+which is what made the fix worth pulling in at all — the two
+implementations converging on the same `authentication`/`assertionMethod`/
+`capabilityInvocation` values is itself evidence upstream's fix is
+correct, cross-checked from a second, independent implementation.
 
 ## What's implemented (real, not stubbed)
 
@@ -240,7 +281,12 @@ container — 2026-09-19.** Not fabricated: `tests/dcp_tck.rs` boots this
 crate's real Credential Service in-process and drives the actual, official
 TCK container against it via `testcontainers`, exactly as it runs in CI.
 Reproduced twice with an identical failure set before being written down
-here.
+here. **Re-run 2026-09-20** after bumping `ds-dcp-core-rs` to `931c6719`
+(see "Provenance" above): identical result, 18 passed / 36 failed with the
+exact same 36 method names `EXPECTED_FAILURES` already asserted — the
+dependency bump is confirmed to be a no-op for TCK conformance, as
+expected (it only changed a hand-rolled-and-still-used code path's
+upstream counterpart, not anything `ServiceIdentity` actually calls).
 
 Scoped to the Credential Service test packages
 (`org.eclipse.dataspacetck.dcp.verification.presentation.cs` +
