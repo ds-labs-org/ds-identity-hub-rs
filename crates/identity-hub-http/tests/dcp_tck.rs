@@ -108,61 +108,75 @@ const TCK_CALLBACK_PORT: u16 = 19183;
 /// asserting an exact set (rather than "no failures") buys, and
 /// `../../ARCHITECTURE.md`'s "DCP TCK conformance snapshot" for the full,
 /// categorized narrative this list summarizes.
+///
+/// **2026-09-20 update:** `storage_write` (Storage API) and
+/// `credential_offer` (Credential Offer API) now require a valid
+/// Self-Issued ID Token, reusing `identity_hub_http::auth::verify_bearer_token`
+/// exactly as the Presentation API and Credential Request API already did -
+/// see those handlers' doc comments in `../src/handlers.rs` and
+/// `../../ARCHITECTURE.md`'s "What's simplified or stubbed". This moved 14
+/// tests from failing to passing (36 -> 22); the 22 that remain fall into
+/// four categories, none of them "no authorization at all" any more:
 const EXPECTED_FAILURES: &[&str] = &[
-    // Self-Issued ID Token validation this bootstrap does not implement
+    // 1. Self-Issued ID Token validation this bootstrap does not implement
     // beyond signature + DID-resolvability + audience + expiry (see
     // identity_hub_http::auth's module doc): no iss==sub equality check, no
     // nbf leeway/check, no capabilityInvocation verification-relationship
-    // restriction on the signing key, and no jti replay tracking.
+    // restriction on the signing key, and no jti replay tracking. Applies
+    // uniformly everywhere `verify_bearer_token` is used - previously only
+    // visible on the Presentation API, now also on the Storage/Offer APIs
+    // (see category 3 below).
     "cs_04_03_03_idTokenInvalidIssuerSub",
     "cs_04_03_03_idTokenInvalidSub",
     "cs_04_03_03_idtokenJtiUsedTwice",
     "cs_04_03_03_idTokenKidNoCapabilityInvocation",
     "cs_04_03_03_idtokenNbfInFuture",
     "cs_05_04_invalidTokenNotAuthorized",
-    // Scope-based authorization is not enforced against what a caller's own
-    // access token (the nested `token` claim) was actually scoped to - any
-    // successfully authenticated caller receives every stored credential
-    // matching the requested type, not just ones its token entitles it to.
+    // 2. Scope-based authorization is not enforced against what a caller's
+    // own access token (the nested `token` claim) was actually scoped to -
+    // any successfully authenticated caller receives every stored
+    // credential matching the requested type, not just ones its token
+    // entitles it to.
     "cs_05_04_01_02_invalidScopeEscalationRequest",
-    // The Storage API (`storage_write`) and Credential Offer API
-    // (`credential_offer`) deliberately accept every well-formed message
-    // unconditionally, with no Authorization-header/token validation at
-    // all - see those handlers' doc comments for why (the TCK's own
-    // Credential-Service setup phase depends on the Storage API accepting
-    // its dynamically generated test credentials unconditionally). Every
-    // "rejects an invalid/missing/malformed auth token" or
-    // "rejects a malformed message body" test against either API fails as
-    // a direct, documented consequence:
+    // 3. The same category-1 Self-Issued ID Token validation gaps
+    // (iss==sub, nbf, jti replay - `iat` too, which the TCK also probes
+    // here but not on the Presentation API), now exercised against the
+    // Storage/Offer APIs now that they run `verify_bearer_token` for real.
+    // Everything else about these tokens' *shape* (missing header, no
+    // "Bearer " prefix, expired, wrong audience, wrong signing key, unknown
+    // kid, an unresolvable subject) is now correctly rejected - see the 14
+    // entries removed from this list in the same change that added this
+    // comment.
     "cs_06_05_01_credentialMessage_iatInFuture",
-    "cs_06_05_01_credentialMessage_incorrectAudience",
-    "cs_06_05_01_credentialMessage_invalidBody",
-    "cs_06_05_01_credentialMessage_invalidStatus",
     "cs_06_05_01_credentialMessage_issNotEqualToSub",
     "cs_06_05_01_credentialMessage_jtiAlreadyUsed",
-    "cs_06_05_01_credentialMessage_missingBearerPrefix",
     "cs_06_05_01_credentialMessage_nbfViolated",
-    "cs_06_05_01_credentialMessage_noAuthHeader",
-    "cs_06_05_01_credentialMessage_tokenExpired",
-    "cs_06_05_01_credentialMessage_tokenSignedWithWrongKey",
-    "cs_06_05_01_credentialMessage_unknownKid",
-    "cs_06_05_01_credentialMessage_unresolvableSubject",
+    "cs_06_06_01_credentialOfferMessage_iatInFuture",
+    "cs_06_06_01_credentialOfferMessage_issNotEqualToSub",
+    "cs_06_06_01_credentialOfferMessage_jtiAlreadyUsed",
+    "cs_06_06_01_credentialOfferMessage_nbfViolated",
+    // 4. A newly-visible, distinct gap `verify_bearer_token` does not
+    // cover: it accepts any `iss` whose `did:web` document resolves and
+    // whose key verifies the signature - there is no separate
+    // "trusted/known issuer" allow-list check (the DCP spec's own "Verify
+    // Trust" step, distinct from signature verification). Previously
+    // invisible because the endpoint accepted everything regardless of
+    // `iss`; now a real, standalone finding.
     "cs_06_05_01_credentialMessage_untrustedIssuer",
+    // 5. Message-content/business-logic validation this bootstrap does not
+    // implement, unrelated to the wrapping Self-Issued ID Token (a
+    // genuinely valid token is presented in every one of these cases): no
+    // schema/enum validation of the `CredentialMessage`/`CredentialOfferMessage`
+    // body itself, no check that `holderPid` matches a request this
+    // process actually issued, no verification of a stored credential's own
+    // embedded proof, and no validation of a `CredentialOfferMessage`'s
+    // credential ids against a known catalog.
+    "cs_06_05_01_credentialMessage_invalidBody",
+    "cs_06_05_01_credentialMessage_invalidStatus",
     "cs_06_05_02_credentialMessage_unverifiableProof",
     "cs_06_05_credentialMessage_unknownHolderPid",
     "cs_06_06_01_credentialOfferMessage_emptyCredentials",
-    "cs_06_06_01_credentialOfferMessage_iatInFuture",
-    "cs_06_06_01_credentialOfferMessage_incorrectAudience",
-    "cs_06_06_01_credentialOfferMessage_issNotEqualToSub",
-    "cs_06_06_01_credentialOfferMessage_jtiAlreadyUsed",
-    "cs_06_06_01_credentialOfferMessage_missingBearerPrefix",
-    "cs_06_06_01_credentialOfferMessage_nbfViolated",
-    "cs_06_06_01_credentialOfferMessage_noAuthHeader",
     "cs_06_06_01_credentialOfferMessage_sparse_randomIds_expect400",
-    "cs_06_06_01_credentialOfferMessage_tokenExpired",
-    "cs_06_06_01_credentialOfferMessage_tokenSignedWithWrongKey",
-    "cs_06_06_01_credentialOfferMessage_unknownKid",
-    "cs_06_06_01_credentialOfferMessage_unresolvableSubject",
 ];
 
 #[tokio::test]

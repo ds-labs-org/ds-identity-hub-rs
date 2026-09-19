@@ -220,17 +220,31 @@ fn build_presentation(
 /// `POST /credentials` on a Credential Service. See
 /// `credential.issuance.protocol.md#storage-api`.
 ///
-/// Deliberately accepts every well-formed `CredentialMessage`
-/// unconditionally, without requiring the `Authorization` header the spec
-/// allows a Credential Service to demand - see `../../ARCHITECTURE.md` for
-/// why: the real `dcp-tck`'s own setup phase for every Credential Service
-/// test case depends on this endpoint genuinely accepting its dynamically
-/// generated test credentials, and this bootstrap does not yet implement
-/// per-client write authorization.
+/// Requires a valid Self-Issued ID Token addressed to this service, exactly
+/// like the Presentation API (`presentation_query`) and the Issuer
+/// Service's Credential Request API (`credential_request`) already do -
+/// see `crate::auth::verify_bearer_token`, which all three now share.
+/// Confirmed empirically (not assumed) that the real `dcp-tck`'s own
+/// Credential-Service setup phase carries exactly such a token on every one
+/// of its legitimate Storage API calls - see `../../ARCHITECTURE.md`'s
+/// "What's simplified or stubbed" for how this was checked and what still
+/// isn't validated beyond signature/audience/expiry (`iss == sub`, `nbf`,
+/// `capabilityInvocation`, `jti` replay).
 async fn storage_write(
     State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
     Json(message): Json<CredentialMessage>,
-) -> StatusCode {
+) -> Response {
+    if let Err(err) = verify_bearer_token(
+        &state.http,
+        bearer_header(&headers),
+        state.identity.own_did(),
+        state.config.insecure_http,
+    )
+    .await
+    {
+        return auth_error_response(err);
+    }
     state.store.store(StoredCredentialBatch {
         issuer_pid: message.issuer_pid,
         holder_pid: message.holder_pid,
@@ -238,7 +252,7 @@ async fn storage_write(
         rejection_reason: message.rejection_reason,
         credentials: message.credentials,
     });
-    StatusCode::OK
+    StatusCode::OK.into_response()
 }
 
 // ---- Credential Issuance Protocol: Credential Offer API ----
@@ -246,13 +260,26 @@ async fn storage_write(
 /// `POST /offers` on a Credential Service. See
 /// `credential.issuance.protocol.md#credential-offer-api`. This bootstrap
 /// only acknowledges the offer (no holder-driven follow-up request is
-/// triggered) - see `../../ARCHITECTURE.md`.
+/// triggered) - see `../../ARCHITECTURE.md`. Requires a valid Self-Issued
+/// ID Token addressed to this service, the same way `storage_write` does
+/// now (see that handler's doc comment).
 async fn credential_offer(
-    State(_state): State<Arc<AppState>>,
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
     Json(message): Json<CredentialOfferMessage>,
-) -> StatusCode {
+) -> Response {
+    if let Err(err) = verify_bearer_token(
+        &state.http,
+        bearer_header(&headers),
+        state.identity.own_did(),
+        state.config.insecure_http,
+    )
+    .await
+    {
+        return auth_error_response(err);
+    }
     tracing::info!(issuer = %message.issuer, count = message.credentials.len(), "received credential offer");
-    StatusCode::OK
+    StatusCode::OK.into_response()
 }
 
 // ---- Credential Issuance Protocol: Issuer Service ----
