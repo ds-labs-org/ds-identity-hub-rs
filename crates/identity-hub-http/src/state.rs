@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Mutex;
 
 use identity_hub_core::identity::ServiceIdentity;
@@ -43,6 +43,13 @@ pub struct AppState {
     /// rather than a configurable catalog (see `../../ARCHITECTURE.md`).
     pub supported_credential: CredentialObject,
     pub http: reqwest::Client,
+    /// `jti` values already accepted by `crate::auth::verify_bearer_token`,
+    /// across every endpoint that calls it - process-lifetime only, per
+    /// `../../ARCHITECTURE.md`'s "No durable storage": sufficient to satisfy
+    /// this bootstrap's own replay-protection scope without needing a
+    /// persisted store, since a real deployment's tokens are short-lived
+    /// (5 minutes) relative to any plausible process uptime concern here.
+    pub seen_jti: Mutex<HashSet<String>>,
 }
 
 impl AppState {
@@ -98,6 +105,7 @@ impl AppState {
             requests: Mutex::new(HashMap::new()),
             supported_credential,
             http,
+            seen_jti: Mutex::new(HashSet::new()),
         }
     }
 

@@ -109,68 +109,72 @@ const TCK_CALLBACK_PORT: u16 = 19183;
 /// `../../ARCHITECTURE.md`'s "DCP TCK conformance snapshot" for the full,
 /// categorized narrative this list summarizes.
 ///
-/// **2026-09-20 update:** `storage_write` (Storage API) and
-/// `credential_offer` (Credential Offer API) now require a valid
-/// Self-Issued ID Token, reusing `identity_hub_http::auth::verify_bearer_token`
-/// exactly as the Presentation API and Credential Request API already did -
-/// see those handlers' doc comments in `../src/handlers.rs` and
-/// `../../ARCHITECTURE.md`'s "What's simplified or stubbed". This moved 14
-/// tests from failing to passing (36 -> 22); the 22 that remain fall into
-/// four categories, none of them "no authorization at all" any more:
+/// **2026-09-20 update (second change today):** `verify_bearer_token`
+/// (`../src/auth.rs`) now also checks `iss == sub`, `nbf` (with a small
+/// clock-skew leeway), the `capabilityInvocation` verification-relationship
+/// restriction on the signing key (using `ds-dcp-core-rs`'s newly-added
+/// `DidDocument::capability_invocation`, bumped in for exactly this - see
+/// "Provenance: ds-dcp-core-rs" above), and in-memory `jti` replay tracking
+/// (`AppState::seen_jti`). TDD'd in `tests/si_token_validation.rs`. This
+/// moved 10 more tests from failing to passing (22 -> 12): the presentation
+/// API's `idTokenInvalidSub`/`idtokenNbfInFuture`/`idTokenKidNoCapabilityInvocation`/
+/// `idtokenJtiUsedTwice`, plus the Storage/Offer APIs' `issNotEqualToSub`/
+/// `nbfViolated`/`jtiAlreadyUsed` (both endpoints). The 12 that remain fall
+/// into four categories:
 const EXPECTED_FAILURES: &[&str] = &[
-    // 1. Self-Issued ID Token validation this bootstrap does not implement
-    // beyond signature + DID-resolvability + audience + expiry (see
-    // identity_hub_http::auth's module doc): no iss==sub equality check, no
-    // nbf leeway/check, no capabilityInvocation verification-relationship
-    // restriction on the signing key, and no jti replay tracking. Applies
-    // uniformly everywhere `verify_bearer_token` is used - previously only
-    // visible on the Presentation API, now also on the Storage/Offer APIs
-    // (see category 3 below).
+    // 1. The nested `token` claim (the actual Verifiable-Presentation
+    // access token a caller forwards inside its Self-Issued ID Token) is
+    // never itself validated - `verify_bearer_token` checks the *outer*
+    // envelope (now including iss==sub/nbf/capabilityInvocation/jti, see
+    // above) but treats the nested `token` value as opaque, extracted and
+    // forwarded/ignored without checking its own signature, its own
+    // iss/sub binding back to the outer envelope's caller, or the scope it
+    // actually grants. All three failures below are this one gap, at
+    // different severities - confirmed by reading the real TCK's own
+    // source (`PresentationFlowSection4Test`/`PresentationFlowSection5Test`
+    // in `eclipse-dataspacetck/dcp-tck`), not guessed from test names alone:
+    // `idTokenInvalidIssuerSub`'s outer envelope is a perfectly valid,
+    // correctly self-issued token (iss==sub==thirdPartyDid, real signature,
+    // real capabilityInvocation) that forwards a nested access token
+    // originally minted for a *different* party (the verifier) - a
+    // confused-deputy case only a nested-token iss/sub binding check would
+    // catch; `invalidTokenNotAuthorized` forwards a nested token that isn't
+    // even a real JWS ("faketoken") inside an otherwise-valid outer
+    // envelope; `invalidScopeEscalationRequest` forwards a real, validly
+    // signed nested token whose granted scope doesn't cover the requested
+    // credential type. This was previously spread across two differently-worded
+    // categories ("Self-Issued ID Token validation gaps" and "scope-based
+    // authorization"); reading the TCK's own source clarified it's one
+    // gap - nested-token validation is simply not implemented at all -
+    // rather than several unrelated ones.
     "cs_04_03_03_idTokenInvalidIssuerSub",
-    "cs_04_03_03_idTokenInvalidSub",
-    "cs_04_03_03_idtokenJtiUsedTwice",
-    "cs_04_03_03_idTokenKidNoCapabilityInvocation",
-    "cs_04_03_03_idtokenNbfInFuture",
     "cs_05_04_invalidTokenNotAuthorized",
-    // 2. Scope-based authorization is not enforced against what a caller's
-    // own access token (the nested `token` claim) was actually scoped to -
-    // any successfully authenticated caller receives every stored
-    // credential matching the requested type, not just ones its token
-    // entitles it to.
     "cs_05_04_01_02_invalidScopeEscalationRequest",
-    // 3. The same category-1 Self-Issued ID Token validation gaps
-    // (iss==sub, nbf, jti replay - `iat` too, which the TCK also probes
-    // here but not on the Presentation API), now exercised against the
-    // Storage/Offer APIs now that they run `verify_bearer_token` for real.
-    // Everything else about these tokens' *shape* (missing header, no
-    // "Bearer " prefix, expired, wrong audience, wrong signing key, unknown
-    // kid, an unresolvable subject) is now correctly rejected - see the 14
-    // entries removed from this list in the same change that added this
-    // comment.
+    // 2. `iat` (issued-at) in the future is not checked - the four checks
+    // this change added were iss==sub, nbf, capabilityInvocation, and jti
+    // replay specifically (per this task's own scope); `iat` was never one
+    // of them, and remains a real, distinct, not-yet-implemented gap on the
+    // Storage/Offer APIs (the TCK does not probe `iat` on the Presentation
+    // API, so this only appears here).
     "cs_06_05_01_credentialMessage_iatInFuture",
-    "cs_06_05_01_credentialMessage_issNotEqualToSub",
-    "cs_06_05_01_credentialMessage_jtiAlreadyUsed",
-    "cs_06_05_01_credentialMessage_nbfViolated",
     "cs_06_06_01_credentialOfferMessage_iatInFuture",
-    "cs_06_06_01_credentialOfferMessage_issNotEqualToSub",
-    "cs_06_06_01_credentialOfferMessage_jtiAlreadyUsed",
-    "cs_06_06_01_credentialOfferMessage_nbfViolated",
-    // 4. A newly-visible, distinct gap `verify_bearer_token` does not
-    // cover: it accepts any `iss` whose `did:web` document resolves and
-    // whose key verifies the signature - there is no separate
-    // "trusted/known issuer" allow-list check (the DCP spec's own "Verify
-    // Trust" step, distinct from signature verification). Previously
-    // invisible because the endpoint accepted everything regardless of
-    // `iss`; now a real, standalone finding.
+    // 3. No "trusted issuer" allow-list check - unchanged from the previous
+    // snapshot. `verify_bearer_token` accepts any `iss` whose `did:web`
+    // resolves and whose key verifies the signature (and, as of today, is
+    // listed under that same document's own `capabilityInvocation` - but
+    // that document itself is never checked against a known/trusted-issuer
+    // list, a distinct step from signature verification).
     "cs_06_05_01_credentialMessage_untrustedIssuer",
-    // 5. Message-content/business-logic validation this bootstrap does not
+    // 4. Message-content/business-logic validation this bootstrap does not
     // implement, unrelated to the wrapping Self-Issued ID Token (a
-    // genuinely valid token is presented in every one of these cases): no
-    // schema/enum validation of the `CredentialMessage`/`CredentialOfferMessage`
-    // body itself, no check that `holderPid` matches a request this
-    // process actually issued, no verification of a stored credential's own
-    // embedded proof, and no validation of a `CredentialOfferMessage`'s
-    // credential ids against a known catalog.
+    // genuinely valid token, now checked against all four new criteria
+    // too, is presented in every one of these cases) - unchanged from the
+    // previous snapshot: no schema/enum validation of the
+    // `CredentialMessage`/`CredentialOfferMessage` body itself, no check
+    // that `holderPid` matches a request this process actually issued, no
+    // verification of a stored credential's own embedded proof, and no
+    // validation of a `CredentialOfferMessage`'s credential ids against a
+    // known catalog.
     "cs_06_05_01_credentialMessage_invalidBody",
     "cs_06_05_01_credentialMessage_invalidStatus",
     "cs_06_05_02_credentialMessage_unverifiableProof",

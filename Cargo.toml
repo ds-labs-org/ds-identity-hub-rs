@@ -16,7 +16,7 @@ repository = "https://github.com/ds-labs-org/ds-identity-hub-rs"
 # branch) for reproducibility; re-resolve with
 # `git ls-remote https://github.com/ds-labs-org/ds-dcp-core-rs` and bump
 # deliberately.
-ds-dcp-core-rs = { git = "https://github.com/ds-labs-org/ds-dcp-core-rs", rev = "931c67194e5a89e83cc154e916303751166f509e" }
+ds-dcp-core-rs = { git = "https://github.com/ds-labs-org/ds-dcp-core-rs", rev = "78ef8d0e25f496a6674fd916939c690af4735023" }
 
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

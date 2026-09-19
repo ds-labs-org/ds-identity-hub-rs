@@ -607,7 +607,7 @@ dependencies = [
 [[package]]
 name = "ds-dcp-core-rs"
 version = "0.1.0"
-source = "git+https://github.com/ds-labs-org/ds-dcp-core-rs?rev=931c67194e5a89e83cc154e916303751166f509e#931c67194e5a89e83cc154e916303751166f509e"
+source = "git+https://github.com/ds-labs-org/ds-dcp-core-rs?rev=78ef8d0e25f496a6674fd916939c690af4735023#78ef8d0e25f496a6674fd916939c690af4735023"
 dependencies = [
  "base64 0.22.1",
  "p256",

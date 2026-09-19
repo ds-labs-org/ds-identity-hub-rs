@@ -127,6 +127,7 @@ async fn presentation_query(
         bearer_header(&headers),
         state.identity.own_did(),
         state.config.insecure_http,
+        &state.seen_jti,
     )
     .await
     {
@@ -227,9 +228,10 @@ fn build_presentation(
 /// Confirmed empirically (not assumed) that the real `dcp-tck`'s own
 /// Credential-Service setup phase carries exactly such a token on every one
 /// of its legitimate Storage API calls - see `../../ARCHITECTURE.md`'s
-/// "What's simplified or stubbed" for how this was checked and what still
-/// isn't validated beyond signature/audience/expiry (`iss == sub`, `nbf`,
-/// `capabilityInvocation`, `jti` replay).
+/// "What's simplified or stubbed" for how this was checked. `iss == sub`,
+/// `nbf`, `capabilityInvocation`, and `jti` replay are all real checks now
+/// too; the nested `token` claim's own validity/scope and `iat` are not -
+/// see the same section for exactly what remains and why.
 async fn storage_write(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -240,6 +242,7 @@ async fn storage_write(
         bearer_header(&headers),
         state.identity.own_did(),
         state.config.insecure_http,
+        &state.seen_jti,
     )
     .await
     {
@@ -273,6 +276,7 @@ async fn credential_offer(
         bearer_header(&headers),
         state.identity.own_did(),
         state.config.insecure_http,
+        &state.seen_jti,
     )
     .await
     {
@@ -296,6 +300,7 @@ async fn credential_request(
         bearer_header(&headers),
         state.identity.own_did(),
         state.config.insecure_http,
+        &state.seen_jti,
     )
     .await
     {
