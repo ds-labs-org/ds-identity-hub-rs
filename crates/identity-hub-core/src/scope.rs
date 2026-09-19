@@ -49,6 +49,23 @@ impl ScopeMatcher {
     }
 }
 
+/// Splits a space-delimited scope string into its individual scope aliases,
+/// per RFC 6749 ยง3.3's own "scope" convention (a list of space-delimited,
+/// case-sensitive strings) - the same convention the real `dcp-tck`'s own
+/// `SecureTokenServerImpl.obtainReadToken` uses when it joins more than one
+/// requested scope with `String.join(" ", scopes)` before calling a Secure
+/// Token Service's `/token` endpoint, and the shape this bootstrap's own
+/// embedded STS (`identity_hub_core::sts::issue_token`) echoes back
+/// verbatim into a minted access token's `scope` claim. Used to recover the
+/// individual scope aliases out of a caller's own *granted* scope (the
+/// nested access-token's `scope` claim) so they can be run back through
+/// [`ScopeMatcher::credential_types`] exactly like a request's own `scope`
+/// array - see `identity-hub-http::handlers::presentation_query`'s
+/// scope-escalation check.
+pub fn split_scope_string(scopes: &str) -> Vec<String> {
+    scopes.split_whitespace().map(|s| s.to_string()).collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -70,5 +87,43 @@ mod tests {
     fn unrecognized_scope_matches_nothing() {
         let matcher = ScopeMatcher::default_pattern();
         assert_eq!(matcher.credential_type("some-other-scope-alias"), None);
+    }
+
+    #[test]
+    fn split_scope_string_splits_multiple_space_delimited_aliases() {
+        assert_eq!(
+            split_scope_string(
+                "org.eclipse.dspace.dcp.vc.type:MembershipCredential org.eclipse.dspace.dcp.vc.type:SensitiveDataCredential"
+            ),
+            vec![
+                "org.eclipse.dspace.dcp.vc.type:MembershipCredential".to_string(),
+                "org.eclipse.dspace.dcp.vc.type:SensitiveDataCredential".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn split_scope_string_handles_a_single_scope_with_no_delimiter() {
+        assert_eq!(
+            split_scope_string("org.eclipse.dspace.dcp.vc.type:MembershipCredential"),
+            vec!["org.eclipse.dspace.dcp.vc.type:MembershipCredential".to_string()]
+        );
+    }
+
+    #[test]
+    fn split_scope_string_of_an_empty_string_is_empty() {
+        assert!(split_scope_string("").is_empty());
+    }
+
+    #[test]
+    fn granted_scope_intersects_with_requested_types_via_credential_types() {
+        // End-to-end within this module: a granted scope string round-trips
+        // through split_scope_string + credential_types exactly like a
+        // request's own `scope` array does - the two are meant to be
+        // directly comparable (see handlers::presentation_query).
+        let matcher = ScopeMatcher::default_pattern();
+        let granted = split_scope_string("org.eclipse.dspace.dcp.vc.type:MembershipCredential");
+        let granted_types = matcher.credential_types(&granted);
+        assert_eq!(granted_types, vec!["MembershipCredential".to_string()]);
     }
 }

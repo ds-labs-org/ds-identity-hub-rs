@@ -109,6 +109,26 @@ const TCK_CALLBACK_PORT: u16 = 19183;
 /// `../../ARCHITECTURE.md`'s "DCP TCK conformance snapshot" for the full,
 /// categorized narrative this list summarizes.
 ///
+/// **2026-09-20 update (third change today):** `presentation_query`
+/// (`../src/handlers.rs`) now enforces scope escalation: it decodes the
+/// caller's nested `token` claim (still unverified as a signature - see
+/// category 1 below) purely to read its own `scope` claim
+/// (`identity_hub_core::scope::split_scope_string` +
+/// `ScopeMatcher::credential_types`, the same matcher the requested `scope`
+/// already went through), and intersects the requested credential types
+/// against it before looking anything up in the store - a caller can no
+/// longer read a credential type it wasn't granted just by asking for it,
+/// even though its outer envelope is perfectly valid. TDD'd in
+/// `tests/presentation_scope_enforcement.rs`, confirmed against the real
+/// TCK (reproduced identically twice) to close exactly
+/// `cs_05_04_01_02_invalidScopeEscalationRequest` (12 -> 11) with zero
+/// regressions on the other 42 previously-passing tests. The two remaining
+/// nested-token-related failures are untouched by this - they need the
+/// nested token's own *signature* verified and bound back to the outer
+/// envelope's caller, which this change deliberately does not do (see
+/// category 1's own doc comment for exactly why that's still a distinct,
+/// larger gap).
+///
 /// **2026-09-20 update (second change today):** `verify_bearer_token`
 /// (`../src/auth.rs`) now also checks `iss == sub`, `nbf` (with a small
 /// clock-skew leeway), the `capabilityInvocation` verification-relationship
@@ -119,37 +139,36 @@ const TCK_CALLBACK_PORT: u16 = 19183;
 /// moved 10 more tests from failing to passing (22 -> 12): the presentation
 /// API's `idTokenInvalidSub`/`idtokenNbfInFuture`/`idTokenKidNoCapabilityInvocation`/
 /// `idtokenJtiUsedTwice`, plus the Storage/Offer APIs' `issNotEqualToSub`/
-/// `nbfViolated`/`jtiAlreadyUsed` (both endpoints). The 12 that remain fall
+/// `nbfViolated`/`jtiAlreadyUsed` (both endpoints). The 11 that remain fall
 /// into four categories:
 const EXPECTED_FAILURES: &[&str] = &[
     // 1. The nested `token` claim (the actual Verifiable-Presentation
     // access token a caller forwards inside its Self-Issued ID Token) is
-    // never itself validated - `verify_bearer_token` checks the *outer*
-    // envelope (now including iss==sub/nbf/capabilityInvocation/jti, see
-    // above) but treats the nested `token` value as opaque, extracted and
-    // forwarded/ignored without checking its own signature, its own
-    // iss/sub binding back to the outer envelope's caller, or the scope it
-    // actually grants. All three failures below are this one gap, at
-    // different severities - confirmed by reading the real TCK's own
-    // source (`PresentationFlowSection4Test`/`PresentationFlowSection5Test`
-    // in `eclipse-dataspacetck/dcp-tck`), not guessed from test names alone:
-    // `idTokenInvalidIssuerSub`'s outer envelope is a perfectly valid,
-    // correctly self-issued token (iss==sub==thirdPartyDid, real signature,
-    // real capabilityInvocation) that forwards a nested access token
-    // originally minted for a *different* party (the verifier) - a
-    // confused-deputy case only a nested-token iss/sub binding check would
-    // catch; `invalidTokenNotAuthorized` forwards a nested token that isn't
-    // even a real JWS ("faketoken") inside an otherwise-valid outer
-    // envelope; `invalidScopeEscalationRequest` forwards a real, validly
-    // signed nested token whose granted scope doesn't cover the requested
-    // credential type. This was previously spread across two differently-worded
-    // categories ("Self-Issued ID Token validation gaps" and "scope-based
-    // authorization"); reading the TCK's own source clarified it's one
-    // gap - nested-token validation is simply not implemented at all -
-    // rather than several unrelated ones.
+    // never itself *authenticated* - `verify_bearer_token` checks the
+    // *outer* envelope (now including iss==sub/nbf/capabilityInvocation/jti)
+    // and, as of today's third change, does read the nested token's own
+    // `scope` claim to enforce it (closing `invalidScopeEscalationRequest`,
+    // no longer listed here) - but its *signature* is still never verified,
+    // and nothing binds it back to the outer envelope's own caller. Both
+    // failures below are that one remaining gap, confirmed by reading the
+    // real TCK's own source (`PresentationFlowSection4Test`/
+    // `PresentationFlowSection5Test` in `eclipse-dataspacetck/dcp-tck`), not
+    // guessed from test names alone: `idTokenInvalidIssuerSub`'s outer
+    // envelope is a perfectly valid, correctly self-issued token
+    // (iss==sub==thirdPartyDid, real signature, real capabilityInvocation)
+    // that forwards a nested access token originally minted for a
+    // *different* party (the verifier) - a confused-deputy case only a
+    // nested-token iss/sub binding check would catch (this bootstrap's new
+    // scope check reads the `scope` claim but never checks who signed it or
+    // for whom, so a forwarded token with someone else's genuinely-granted
+    // scope still passes); `invalidTokenNotAuthorized` forwards a nested
+    // token that isn't even a real JWS ("faketoken") inside an
+    // otherwise-valid outer envelope - this bootstrap's `granted_credential_types`
+    // (`../src/handlers.rs`) fails to decode it and falls back to *no*
+    // restriction being applied (the pre-existing, unauthenticated-scope
+    // default), rather than the outright rejection this test expects.
     "cs_04_03_03_idTokenInvalidIssuerSub",
     "cs_05_04_invalidTokenNotAuthorized",
-    "cs_05_04_01_02_invalidScopeEscalationRequest",
     // 2. `iat` (issued-at) in the future is not checked - the four checks
     // this change added were iss==sub, nbf, capabilityInvocation, and jti
     // replay specifically (per this task's own scope); `iat` was never one
