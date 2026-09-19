@@ -1,0 +1,35 @@
+[workspace]
+resolver = "2"
+members = ["crates/identity-hub-core", "crates/identity-hub-http"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+repository = "https://github.com/ds-labs-org/ds-identity-hub-rs"
+
+[workspace.dependencies]
+# Role-agnostic DCP primitives (compact JWS ES256 sign/verify, did:web
+# resolution, PresentationQueryMessage/PresentationResponseMessage wire
+# shapes) - extracted from ds-catalog-broker-rs's own dcp-core crate, now a
+# shared, standalone dependency. Pinned to a specific commit (not a floating
+# branch) for reproducibility; re-resolve with
+# `git ls-remote https://github.com/ds-labs-org/ds-dcp-core-rs` and bump
+# deliberately.
+ds-dcp-core-rs = { git = "https://github.com/ds-labs-org/ds-dcp-core-rs", rev = "d55b62d7f184b0e03d55e1d08938875f5c7097a4" }
+
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "sync", "time"] }
+axum = "0.8"
+tower = { version = "0.5", features = ["util"] }
+uuid = { version = "1", features = ["v4"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+p256 = { version = "0.13", features = ["ecdsa", "pem"] }
+rand = "0.8"
+base64 = "0.22"
+regex = "1"
+clap = { version = "4", features = ["derive"] }

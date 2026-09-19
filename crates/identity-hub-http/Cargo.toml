@@ -1,0 +1,36 @@
+[package]
+name = "identity-hub-http"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+description = "axum HTTP surface for ds-identity-hub-rs: a DCP Credential Service (Presentation API, Storage API, Credential Offer API, DID hosting, STS) and a minimal Issuer Service (Credential Request API, Credential Request Status API, Issuer Metadata API)."
+
+[[bin]]
+name = "identity-hub"
+path = "src/main.rs"
+
+[dependencies]
+identity-hub-core = { path = "../identity-hub-core" }
+ds-dcp-core-rs = { workspace = true }
+axum = { workspace = true }
+tokio = { workspace = true }
+tower = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+uuid = { workspace = true }
+reqwest = { workspace = true }
+regex = { workspace = true }
+clap = { workspace = true }
+
+[dev-dependencies]
+# Runs the real `eclipsedataspacetck/dcp-tck-runtime` container in
+# tests/dcp_tck.rs, same pattern (and crate/major version) as
+# ds-sql-dps-rs/dataplane/tests/dps_tck.rs.
+testcontainers = "0.26"
+futures = "0.3"
+regex = { workspace = true }

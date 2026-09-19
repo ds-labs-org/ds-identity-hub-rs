@@ -1,0 +1,65 @@
+name: CI
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+    branches: ["main"]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  quality:
+    name: Format, lint, and test (fast, no Docker)
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+      - name: Run clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      # #[ignore]d by default (crates/identity-hub-http/tests/dcp_tck.rs) so
+      # this stays fast and never needs Docker - that test has its own job
+      # below.
+      - name: Run tests
+        run: cargo test --workspace
+
+  dcp-tck:
+    name: DCP TCK conformance (Credential Service scope)
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      # GitHub-hosted ubuntu-latest runners have Docker preinstalled;
+      # testcontainers (crates/identity-hub-http/tests/dcp_tck.rs) drives it
+      # directly to pull and run the real, official
+      # eclipsedataspacetck/dcp-tck-runtime:latest image against a real,
+      # in-process instance of this crate's Credential Service - no mock,
+      # no reimplementation of the TCK's own assertions.
+      #
+      # This does NOT claim full DCP TCK conformance: see
+      # ARCHITECTURE.md, "DCP TCK conformance snapshot" for the real,
+      # date-stamped pass/fail counts and exactly what this bootstrap
+      # implements versus simplifies. The test asserts the exact,
+      # already-documented set of TCK failures that scope implies - see
+      # crates/identity-hub-http/tests/dcp_tck.rs for precisely which and
+      # why - so this job still gates merges: a real regression, or the TCK
+      # reporting a different failure set than documented, fails it.
+      - name: Run the DCP TCK conformance test
+        run: cargo test -p identity-hub-http --test dcp_tck -- --ignored --nocapture
