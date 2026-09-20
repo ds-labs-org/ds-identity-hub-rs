@@ -1,0 +1,23 @@
+[package]
+name = "identity-hub-graph"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+description = "Embedded Oxigraph RDF store for ds-identity-hub-rs: accepted credential batches and accepted credential offers as real, SPARQL-addressable triples, reachable through Contreforts' connector interface via identity-hub-contreforts."
+
+[dependencies]
+oxigraph = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+uuid = { workspace = true }
+# Not used directly by this crate. Forces Cargo's resolver to keep a
+# digest-0.11-compatible `sha2` instance around for oxigraph's own SPARQL
+# `HASH()` support (`spareval`, via `md-5`/`sha1` 0.11.x, needs `sha2`'s
+# `Sha384`/`Sha512` to implement the same `digest::Digest` trait version),
+# separate from the digest-0.10-compatible `sha2` instance
+# `ds-dcp-core-rs`'s own `p256` dependency pins - without this, Cargo
+# unifies onto the older `sha2` and oxigraph fails to compile. See
+# ../../ARCHITECTURE.md, "Provenance: Contreforts" for the full account.
+sha2 = "0.11"

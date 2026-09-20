@@ -307,10 +307,13 @@ async fn storage_write(
 
 /// `POST /offers` on a Credential Service. See
 /// `credential.issuance.protocol.md#credential-offer-api`. This bootstrap
-/// only acknowledges the offer (no holder-driven follow-up request is
-/// triggered) - see `../../ARCHITECTURE.md`. Requires a valid Self-Issued
-/// ID Token addressed to this service, the same way `storage_write` does
-/// now (see that handler's doc comment).
+/// records the offer as a real, queryable RDF record in the same
+/// Contreforts-backed graph the Storage API uses (see
+/// `identity_hub_graph::CredentialGraph::add_offer` and
+/// `../../ARCHITECTURE.md`, "Provenance: Contreforts") but does not yet
+/// trigger a holder-driven follow-up request - see `../../ARCHITECTURE.md`.
+/// Requires a valid Self-Issued ID Token addressed to this service, the
+/// same way `storage_write` does now (see that handler's doc comment).
 async fn credential_offer(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -327,7 +330,22 @@ async fn credential_offer(
     {
         return auth_error_response(err);
     }
-    tracing::info!(issuer = %message.issuer, count = message.credentials.len(), "received credential offer");
+    let offer_id = state
+        .store
+        .graph()
+        .add_offer(identity_hub_graph::NewAcceptedOffer {
+            issuer: message.issuer.clone(),
+            credentials: message
+                .credentials
+                .iter()
+                .map(|c| identity_hub_graph::OfferedCredential {
+                    id: c.id.clone(),
+                    credential_type: c.credential_type.clone(),
+                })
+                .collect(),
+        })
+        .expect("accepted-offer insert into RDF store");
+    tracing::info!(issuer = %message.issuer, count = message.credentials.len(), offer_id = %offer_id, "received credential offer, recorded as RDF");
     StatusCode::OK.into_response()
 }
 

@@ -13,6 +13,9 @@ path = "src/main.rs"
 
 [dependencies]
 identity-hub-core = { path = "../identity-hub-core" }
+identity-hub-graph = { path = "../identity-hub-graph" }
+identity-hub-contreforts = { path = "../identity-hub-contreforts" }
+contreforts-core = { path = "../../vendor/contreforts-core" }
 ds-dcp-core-rs = { workspace = true }
 axum = { workspace = true }
 tokio = { workspace = true }

@@ -1,0 +1,72 @@
+########################################################################
+# ds-identity-hub-rs -- self-description for Contreforts' connector
+# interface
+#
+# Modelled closely on ds-sql-dps-rs/contreforts-connector/src/declaration.ttl,
+# which is itself modelled on contreforts-core/declaration's own
+# tests/fixtures/forgejo-declaration.ttl (D1/D2/D6/D8/D9): extension
+# vocabulary and fields live in this connector's own namespace, never
+# under Contreforts' shared core: namespace.
+#
+# Neither entity this connector serves ("an accepted DCP credential batch",
+# "an accepted DCP credential offer") has a good alignment target among
+# core's 15 business-sync concepts (customer, invoice, project, ...) -- both
+# are declared with no skos:closeMatch/exactMatch, rather than forced into
+# a mismatched one, exactly as ds-sql-dps-rs's own data-offer declaration
+# does.
+########################################################################
+
+@prefix rdf:  <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
+@prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+@prefix xsd:  <http://www.w3.org/2001/XMLSchema#> .
+@prefix sh:   <http://www.w3.org/ns/shacl#> .
+
+@prefix dsih: <https://ds42.org/ontologies/ds-identity-hub-rs#> .
+@prefix contreforts: <https://contreforts.ds-labs.org/ontologies/declaration#> .
+
+########################################################################
+# Entity vocabulary
+########################################################################
+
+dsih:StoredCredentialBatch a rdfs:Class ;
+    rdfs:label "Stored credential batch" ;
+    rdfs:comment """One accepted DCP CredentialMessage (Storage API, POST
+/credentials on a Credential Service): correlation/status fields plus the
+Verifiable Credential containers it carries. Lives in this project's own
+credential graph (identity-hub-graph; see ../../../ARCHITECTURE.md); this
+class exists so that graph is reachable through Contreforts' connector
+interface, keyed by EntityKind "ds-identity-hub-rs:stored-credential-batch".""" .
+
+dsih:AcceptedCredentialOffer a rdfs:Class ;
+    rdfs:label "Accepted credential offer" ;
+    rdfs:comment """One accepted DCP CredentialOfferMessage (Credential
+Offer API, POST /offers on a Credential Service): the offering issuer and
+the CredentialObjects it offered. Lives in the same credential graph as
+dsih:StoredCredentialBatch, keyed by EntityKind
+"ds-identity-hub-rs:accepted-offer".""" .
+
+########################################################################
+# Configuration schema
+#
+# MVP: this bootstrap has exactly one in-process credential graph instance
+# per running Credential Service, so there is nothing to route between --
+# this one field exists purely so the declaration carries a real,
+# meta-shape-valid connector shape, matching the pattern
+# ds-sql-dps-rs/contreforts-connector/src/declaration.ttl already
+# establishes for the same reason.
+########################################################################
+
+dsih:CredentialGraphConnectorShape a sh:NodeShape ;
+    sh:targetClass dsih:CredentialGraphConnector ;
+    contreforts:category "dataspace" ;
+
+    sh:property [
+        sh:path dsih:graphSource ;
+        sh:name "Graph source" ;
+        sh:description "Identifies which in-process credential graph instance this connector serves. This bootstrap always has exactly one, named 'primary'." ;
+        sh:datatype xsd:string ;
+        sh:nodeKind sh:Literal ;
+        sh:minCount 1 ;
+        sh:maxCount 1 ;
+        sh:order 1 ;
+    ] .

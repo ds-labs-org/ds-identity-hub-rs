@@ -87,7 +87,37 @@ async fn main() {
         "starting ds-identity-hub-rs"
     );
 
-    let (_state, router) = build(config.clone());
+    let (state, router) = build(config.clone());
+
+    // Proves the Contreforts round trip at startup, mirroring
+    // ds-sql-dps-rs's dataplane/src/lib.rs::build(): the same graph this
+    // process's Storage API/Credential Offer API write into
+    // (state.store.graph()) is reachable through Contreforts' own
+    // connector interface, keyed by this project's own EntityKinds - see
+    // identity-hub-contreforts's crate docs and ../../ARCHITECTURE.md,
+    // "Provenance: Contreforts". Only meaningful in Credential Service mode
+    // (the Issuer Service mode has no credential graph to speak of).
+    if config.mode == Mode::CredentialService {
+        use contreforts_core::ContrefortsConnector;
+        let connector =
+            identity_hub_contreforts::CredentialGraphConnector::new(state.store.graph());
+        match connector
+            .pull(
+                contreforts_core::EntityKind::new(identity_hub_contreforts::STORED_CREDENTIAL_KIND),
+                None,
+            )
+            .await
+        {
+            Ok(docs) => {
+                tracing::info!(
+                    count = docs.len(),
+                    "ContrefortsConnector::pull round trip (stored credentials)"
+                )
+            }
+            Err(e) => tracing::warn!(error = %e, "ContrefortsConnector::pull round trip failed"),
+        }
+    }
+
     if let Err(err) = serve(&config, router).await {
         tracing::error!(error = %err, "server exited with an error");
         std::process::exit(1);

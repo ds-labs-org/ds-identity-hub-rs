@@ -9,6 +9,7 @@ description = "Domain types for ds-identity-hub-rs: stored credential records, D
 
 [dependencies]
 ds-dcp-core-rs = { workspace = true }
+identity-hub-graph = { path = "../identity-hub-graph" }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }

@@ -3,13 +3,18 @@
 **Status:** Bootstrap, working end to end against the real TCK (see "DCP TCK
 conformance snapshot" below). Not yet integrated with a live dataspace
 control plane, a real key-management/HSM backend, or a persistent store.
-**Date:** 2026-09-20 (three changes today: real per-request authorization
+**Date:** 2026-09-20 (four changes today: real per-request authorization
 added to the Storage API and Credential Offer API; then `verify_bearer_token`
 gained `iss == sub`, `nbf`, `capabilityInvocation`, and `jti`-replay checks;
 then the Presentation API gained scope-escalation enforcement against the
 caller's own nested access-token grant; see "What's simplified or stubbed"
 and "DCP TCK conformance snapshot" below — 36 -> 22 -> 12 -> 11 real TCK
-failures, each step TDD'd and re-measured, not assumed)
+failures, each step TDD'd and re-measured, not assumed; then, separately
+from TCK conformance, the Storage API's credential store and the
+Credential Offer API's accepted-offer record were rebuilt on a
+Contreforts-backed semantic RDF graph — see "Provenance: Contreforts";
+still 43/54 real TCK conformance, unchanged, confirmed by re-running it
+after this change)
 
 This file records the scope and design decisions behind this project's
 bootstrap, why each was made, and an honest accounting of what actually
@@ -163,6 +168,125 @@ see `ds-dcp-core-rs`'s own commit for the three new tests. `#[serde(default)]`
 on the new field keeps it backward compatible with any DID document that
 omits it (DID Core treats the array as optional).
 
+## Provenance: Contreforts
+
+**2026-09-20:** the Storage API's credential store and the Credential
+Offer API's accepted-offer record were rebuilt on
+[Contreforts](https://github.com/contreforts-ai) — the same
+SHACL-declared, SPARQL-addressable semantic configuration graph
+`ds-sql-dps-rs` already vendors and wires up (see that project's own
+`ARCHITECTURE.md`, "Contreforts coupling"), following its precedent
+closely rather than inventing a new pattern for this project.
+
+**What was reused, and what was minted fresh — same split
+`ds-sql-dps-rs` made, for the same reason:** Contreforts' public org
+(github.com/contreforts-ai) is an ERP/business-data-sync and RAG toolkit —
+there is no DCP, VC, or Dataspace Protocol vocabulary anywhere in its
+public code, and `ContrefortsConnector` (`pull`/`push`/`get`/
+`fetch_content`, plus a Turtle `declaration_ttl()` self-description
+validated by SHACL) is a generic adapter trait designed for wrapping a
+business SaaS system, not a dataspace participant. What genuinely
+transfers is the *pattern*: a physically separate, SHACL-declared,
+SPARQL-addressable graph, reachable through a uniform connector interface,
+isolated from anything else the process holds. This project reuses only
+that interface/declaration *mechanism* — it mints its own entity kinds
+(`ds-identity-hub-rs:stored-credential-batch`,
+`ds-identity-hub-rs:accepted-offer`, in `crates/identity-hub-contreforts`)
+and its own namespace (`https://ds42.org/ontologies/ds-identity-hub-rs#`,
+`crates/identity-hub-contreforts/src/declaration.ttl`) rather than forcing
+itself into Contreforts' business vocabulary, exactly as
+`ds-sql-dps-rs/contreforts-connector` does for its own `data-offer` kind.
+
+**Vendoring:** `vendor/contreforts-core` is a git submodule pinned to
+commit `95a4940` (`95a49404a60024a5b432b17f7a7c299a3dac9c3f`, `develop`
+branch HEAD at the time of vendoring) — no tag is published upstream, the
+same situation `ds-sql-dps-rs` documented for the same submodule, and
+(not a coincidence) the exact same commit that project already pinned:
+both projects vendor the identical upstream snapshot, which is what makes
+the two connectors directly comparable. It is a workspace member (root
+`Cargo.toml`'s `members`) alongside this project's own crates, inheriting
+`version`/`edition` via `.workspace = true` — that crate's own manifest
+expects a superproject to supply these, per its own comment.
+
+**RDF schema: what maps to real Verifiable Credentials vocabulary, and
+what stays project-specific, and why:**
+
+- `crates/identity-hub-graph` decomposes each accepted `CredentialMessage`
+  batch into a `ds:CredentialBatch` node carrying the correlation/status
+  fields that are wire fields of the Credential Issuance Protocol itself
+  (`issuerPid`, `holderPid`, `status`, `rejectionReason`) — there is no
+  W3C Verifiable Credentials term for "the DCP-level status of a delivery
+  attempt", so these stay in this project's own `ds:` namespace
+  (`https://ds42.org/ontologies/ds-identity-hub-rs#`), the same way
+  `ds-sql-dps-rs/config-graph` keeps its own `ds:filePath`/`ds:order`
+  alongside real DCAT/ODRL terms.
+- Each stored `CredentialContainer` becomes a real
+  `vc:VerifiableCredential` node (`https://www.w3.org/2018/credentials#`)
+  — a genuine, correct use of the real vocabulary term, since that is
+  exactly what the container holds. `credentialType`/`format`/`payload`
+  stay in `ds:`, deliberately: this store never decodes or verifies the
+  credential payload itself (an opaque JWS string for `format: "jwt"`, a
+  JSON-LD document for others), so there is no decomposed `vc:issuer`/
+  `vc:credentialSubject` to extract without parsing (and likely
+  half-verifying) claims a storage layer has no business interpreting —
+  see "No message-content/business-logic validation..." above, which this
+  change deliberately leaves untouched. `payload` is stored as the literal
+  JSON serialization of the original `serde_json::Value`, so it round-trips
+  losslessly regardless of shape.
+- An accepted `CredentialOfferMessage` becomes a
+  `ds:AcceptedCredentialOffer` node. Its `issuer` field, unlike a
+  container's un-decomposed payload, *is* a plain, already-decomposed
+  string identifying the offering party — a genuine fit for the real
+  `vc:issuer` term, used here instead of a `ds:` predicate. Each offered
+  `CredentialObject` reference becomes a small child node recording its
+  catalog id (`ds:credentialId`) and, when present, its credential type
+  (`ds:credentialType`).
+- `ds:order` (an explicit integer on every batch/offer node and every
+  child credential/offered-credential node) exists for the same reason
+  `ds-sql-dps-rs/config-graph`'s own `ds:order` does: a `credentials`
+  array is an *ordered* JSON array, but plain RDF triples for a
+  multi-valued property carry no order at all — see
+  `crates/identity-hub-graph/src/vocab.rs`'s doc comment.
+- Every batch/credential/offer *attribute* is stored as a plain RDF
+  literal, never a minted IRI, because (unlike `config-graph`'s
+  operator-configured `dataset_id`) the credential-type strings flowing
+  through this store can be attacker-influenced — see
+  `crates/identity-hub-graph/src/store.rs`'s module doc comment for the
+  full reasoning and how `credentials_of_types` avoids building a SPARQL
+  query from untrusted input.
+
+**Not a durability upgrade:** `CredentialGraph::open_in_memory()` opens an
+Oxigraph store with no on-disk backing, exactly mirroring
+`ds-sql-dps-rs/config-graph::ConfigGraph::open_in_memory`'s own doc
+comment ("there is no on-disk persistence requirement this small a config
+warrants yet"). See "No durable storage, but real semantic structure now"
+above for the full accounting of what changed and what didn't.
+
+**What's unverified**, same caveat `ds-sql-dps-rs` recorded for its own
+connector: how a connector actually gets wired into a *running*
+Contreforts product is handled by `contreforts-product`, which is
+private. `crates/identity-hub-http/src/main.rs` calls
+`CredentialGraphConnector::pull(STORED_CREDENTIAL_KIND, ...)` once at
+startup (Credential Service mode only) to prove the round trip compiles
+and returns real data over the exact graph the Storage API writes into,
+but nothing here has been run against an actual Contreforts deployment.
+
+**Tests:** `crates/identity-hub-graph/src/store.rs`'s unit tests exercise
+the SPARQL round trip directly (store a batch, query it back by type,
+confirm a `REJECTED`-status batch's credential is excluded — mirroring
+the original `InMemoryCredentialStore` unit test's own scenario byte for
+byte), plus batch/offer field round-tripping, ordering, and arbitrary JSON
+payload shapes. `crates/identity-hub-contreforts/tests/declaration_validates.rs`
+checks `declaration.ttl` against Contreforts' own real SHACL meta-shapes,
+identically to `ds-sql-dps-rs/contreforts-connector`'s own test. The
+pre-existing `identity-hub-core::store` unit test and every
+`identity-hub-http` HTTP-layer test
+(`storage_offer_auth.rs`/`si_token_validation.rs`/
+`presentation_scope_enforcement.rs`) and the real DCP TCK conformance test
+(`dcp_tck.rs`) all pass unmodified against the new graph-backed store —
+see "DCP TCK conformance snapshot" below, which is unchanged by this work
+(same 43/54, same 11 failing test names).
+
 ## What's implemented (real, not stubbed)
 
 - **`did:web` hosting**, for both a process's own Credential-Service/
@@ -172,8 +296,9 @@ omits it (DID Core treats the array as optional).
   arrays, genuinely resolvable over HTTP (`GET /<segment>/did.json`).
 - **The Storage API** (`POST /credentials` on a Credential Service) — a
   real accept-and-store path: parses a `CredentialMessage`, stores every
-  credential container in an in-memory, process-lifetime
-  `InMemoryCredentialStore`. **Requires a valid Self-Issued ID Token**
+  credential container as real RDF triples in `InMemoryCredentialStore`
+  (in-memory, process-lifetime, now Contreforts-backed as of 2026-09-20 -
+  see "Provenance: Contreforts"). **Requires a valid Self-Issued ID Token**
   addressed to this service (`identity_hub_http::auth::verify_bearer_token`
   — the same function the Presentation API and the Issuer Service's
   Credential Request API already used), as of 2026-09-20 — see "What's
@@ -196,7 +321,9 @@ omits it (DID Core treats the array as optional).
   Verifiable Presentation wrapping them. Verified genuinely working against
   the real TCK — see "DCP TCK conformance snapshot".
 - **The Credential Offer API** (`POST /offers` on a Credential Service) —
-  accepts and logs a `CredentialOfferMessage`; does not yet trigger a
+  accepts a `CredentialOfferMessage` and records it as a real, queryable
+  RDF record (`identity_hub_graph::CredentialGraph::add_offer`, as of
+  2026-09-20 - see "Provenance: Contreforts"); does not yet trigger a
   holder-driven follow-up credential request (see "What's out of scope").
   **Requires a valid Self-Issued ID Token** addressed to this service, the
   same way the Storage API now does (see above and "What's simplified or
@@ -386,8 +513,25 @@ including the first (wrong) fixes tried along the way).
   "Scope-escalation enforcement" above.)
 - **No revocation status checking** (`StatusList2021`/
   `BitstringStatusList`) on presented or stored credentials.
-- **No durable storage.** `InMemoryCredentialStore` and the Issuer
-  Service's request-tracking map are both process-lifetime only.
+- **No durable storage, but real semantic structure now (2026-09-20).**
+  `InMemoryCredentialStore` (Storage API) and the accepted-offer record
+  (Credential Offer API) are no longer a bare `Vec`/no-structure blob: a
+  stored credential batch and an accepted offer are now real RDF triples in
+  an embedded Oxigraph store (`identity-hub-graph`), addressed by blank
+  node, queryable via SPARQL, and reachable through Contreforts' generic
+  connector interface (`identity-hub-contreforts`) - see "Provenance:
+  Contreforts" below for the full design. This is **not** a durability
+  upgrade, and is not meant to be read as one: the graph is opened with
+  `Store::new()` (Oxigraph's in-memory backend), never persisted to disk,
+  and still lives and dies with the process - exactly like the Issuer
+  Service's own request-tracking `HashMap`, which this change does not
+  touch. The value added is a native semantic runtime layer (real triples,
+  IRI addressing, SPARQL queryability, a genuine connector-interface
+  round trip), not persistence across restarts. This mirrors
+  `ds-sql-dps-rs/config-graph`'s own precedent and its own doc comment's
+  reasoning almost verbatim: "there is no on-disk persistence requirement
+  this small a config warrants yet" - the same call, made for the same
+  reason, on a second project in this study.
 - **The Issuer Service supports exactly one hardcoded `CredentialObject`**
   (`MembershipCredential`), not a configurable catalog.
 - **Keys are generated fresh on every process start**, never persisted —
@@ -563,9 +707,34 @@ the TCK, reconciles the new failure set, and updates both this file and
 ds-identity-hub-rs/
   crates/
     identity-hub-core/     Domain types: DID/service-identity construction,
-                            VPP/CIP wire-message shapes, in-memory
-                            credential store, scope-to-type matcher, the
+                            VPP/CIP wire-message shapes, the
+                            Contreforts-backed credential store's public
+                            surface (InMemoryCredentialStore, wrapping
+                            identity-hub-graph), scope-to-type matcher, the
                             embedded STS. Built on ds-dcp-core-rs.
+    identity-hub-graph/    Embedded Oxigraph RDF store: accepted credential
+                            batches and accepted credential offers as real,
+                            SPARQL-addressable triples. Own domain types
+                            (CredentialBatch/CredentialEntry/AcceptedOffer),
+                            independent of identity-hub-core - see
+                            "Provenance: Contreforts" above.
+      src/
+        vocab.rs            Namespace IRIs: real W3C Verifiable Credentials
+                            terms plus this project's own ds: predicates.
+        model.rs            Plain input/output domain structs.
+        store.rs             CredentialGraph: open_in_memory, add_batch/
+                            batches/batch, add_offer/offers/offer,
+                            credentials_of_types.
+    identity-hub-contreforts/
+                            Implements contreforts_core::ContrefortsConnector
+                            for identity-hub-graph's CredentialGraph, with
+                            its own minted EntityKinds and declaration.ttl.
+      src/
+        lib.rs               CredentialGraphConnector.
+        declaration.ttl      Self-description, SHACL-validated.
+      tests/
+        declaration_validates.rs   Validates declaration.ttl against
+                            Contreforts' own real SHACL meta-shapes.
     identity-hub-http/     axum HTTP surface (Credential Service + Issuer
                             Service modes) and the dcp-tck conformance test.
       src/
@@ -575,7 +744,9 @@ ds-identity-hub-rs/
                             reqwest client (host.docker.internal override).
         auth.rs             Self-Issued ID Token validation.
         handlers.rs         All HTTP routes for both modes.
-        main.rs             CLI: `identity-hub credential-service|issuer-service`.
+        main.rs             CLI: `identity-hub credential-service|issuer-service`;
+                            also runs the one-off Contreforts round-trip
+                            proof at startup (Credential Service mode).
       tests/
         dcp_tck.rs               Real dcp-tck-runtime conformance test.
         dcp.tck.properties       TCK config, bind-mounted into the container.
@@ -587,6 +758,13 @@ ds-identity-hub-rs/
                                   Scope-escalation enforcement against the
                                   caller's own granted scope (real HTTP, no
                                   Docker/TCK needed).
+  vendor/
+    contreforts-core/      Git submodule (contreforts-ai/contreforts-core),
+                            pinned to commit 95a4940 - the same commit
+                            ds-sql-dps-rs vendors. Provides the
+                            ContrefortsConnector trait and, via its nested
+                            declaration/ crate, the SHACL meta-shape
+                            validator identity-hub-contreforts's test uses.
 ```
 
 ## Building and testing

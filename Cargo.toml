@@ -1,7 +1,19 @@
 [workspace]
 resolver = "2"
-members = ["crates/identity-hub-core", "crates/identity-hub-http"]
+members = [
+    "crates/identity-hub-core",
+    "crates/identity-hub-http",
+    "crates/identity-hub-graph",
+    "crates/identity-hub-contreforts",
+    "vendor/contreforts-core",
+]
 
+# vendor/contreforts-core's own Cargo.toml inherits `version`/`edition` via
+# `.workspace = true` -- it is designed to be vendored as a workspace member
+# of a consuming project, not built standalone (its own repo has no
+# `[workspace]` of its own; upstream expects a superproject to supply
+# these), exactly like `ds-sql-dps-rs`'s own root `Cargo.toml` does for the
+# same submodule.
 [workspace.package]
 version = "0.1.0"
 edition = "2024"
@@ -33,3 +45,16 @@ rand = "0.8"
 base64 = "0.22"
 regex = "1"
 clap = { version = "4", features = ["derive"] }
+
+# Contreforts-backed semantic storage (crates/identity-hub-graph,
+# crates/identity-hub-contreforts) - versions matched to ds-sql-dps-rs's own
+# workspace pins for consistency across the ds-labs-org family (see
+# ds-sql-dps-rs/Cargo.toml).
+oxigraph = { version = "0.5", default-features = false }
+async-trait = "0.1"
+chrono = { version = "0.4", features = ["serde"] }
+# Required only because vendor/contreforts-core inherits these via
+# `.workspace = true` (see the members comment above) - not used directly
+# by this project's own crates.
+dirs = "5"
+urlencoding = "2"

@@ -1,0 +1,19 @@
+[package]
+name = "identity-hub-contreforts"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+description = "Implements Contreforts' ContrefortsConnector trait for identity-hub-graph's credential graph, so ds-identity-hub-rs's accepted credentials and credential offers are reachable through Contreforts' generic connector interface."
+
+[dependencies]
+contreforts-core = { path = "../../vendor/contreforts-core" }
+identity-hub-graph = { path = "../identity-hub-graph" }
+async-trait = { workspace = true }
+serde_json = { workspace = true }
+chrono = { workspace = true }
+
+[dev-dependencies]
+contreforts-declaration = { path = "../../vendor/contreforts-core/declaration" }
+tokio = { workspace = true }
