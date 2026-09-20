@@ -95,6 +95,15 @@ pub struct Config {
     /// and `tests/dcp_tck.rs`, which passes the identical value here via
     /// [`Config::with_known_holder_pids`].
     pub known_holder_pids: Vec<String>,
+    /// Operator-supplied extra hosts to add to `state::AppState::new`'s
+    /// derived outbound-request allow-list (`outbound::OutboundPolicy`),
+    /// on top of the hosts that policy always derives from this service's
+    /// own configuration (its own `did_host`, `127.0.0.1`, and
+    /// `host.docker.internal`) - see that constructor's own doc comment.
+    /// Empty by default: this bootstrap's own configuration is normally
+    /// sufficient on its own. Wired to the repeatable `--allow-resolve-host`
+    /// CLI flag.
+    pub allowed_outbound_hosts: Vec<String>,
 }
 
 impl Config {
@@ -120,6 +129,7 @@ impl Config {
             insecure_http: true,
             trusted_issuer_dids: Vec::new(),
             known_holder_pids: Vec::new(),
+            allowed_outbound_hosts: Vec::new(),
         }
     }
 

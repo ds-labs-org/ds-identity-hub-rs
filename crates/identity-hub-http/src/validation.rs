@@ -19,6 +19,8 @@ use serde_json::Value;
 
 use identity_hub_core::messages::{CredentialContainer, CredentialObject, IssuerMetadata};
 
+use crate::outbound::OutboundPolicy;
+
 /// `CredentialMessage.status` values this bootstrap recognizes - the same
 /// two the real TCK's own (decompiled)
 /// `org.eclipse.dataspacetck.dcp.system.cs.CredentialMessage.validate()`
@@ -95,6 +97,7 @@ pub async fn verify_credential_proofs(
     http: &reqwest::Client,
     credentials: &[CredentialContainer],
     insecure_http: bool,
+    outbound: &OutboundPolicy,
 ) -> Result<(), ValidationError> {
     for container in credentials {
         if !container.format.to_lowercase().contains("jwt") {
@@ -113,6 +116,13 @@ pub async fn verify_credential_proofs(
         let kid = header.get("kid").and_then(Value::as_str).ok_or_else(|| {
             ValidationError::UnverifiableProof("credential JWS has no kid header".to_string())
         })?;
+        // The credential's own `iss` is data carried inside a message body
+        // this service did not author - checked before `resolve_did`,
+        // mirroring `auth::verify_bearer_token`'s ordering for the same
+        // reason (2026-09-20 audit, outbound request confinement).
+        outbound
+            .check_did(vc_issuer, insecure_http)
+            .map_err(|e| ValidationError::UnverifiableProof(e.to_string()))?;
         let issuer_doc = dcp_core::resolve_did(http, vc_issuer, insecure_http)
             .await
             .map_err(ValidationError::UnverifiableProof)?;
@@ -144,6 +154,7 @@ pub async fn validate_offer_credentials(
     issuer_did: &str,
     credentials: &[CredentialObject],
     insecure_http: bool,
+    outbound: &OutboundPolicy,
 ) -> Result<(), ValidationError> {
     if credentials.is_empty() {
         return Err(ValidationError::EmptyCredentials);
@@ -156,11 +167,21 @@ pub async fn validate_offer_credentials(
     if sparse_ids.is_empty() {
         return Ok(());
     }
+    // `issuer_did` names who this catalog lookup will contact - checked
+    // before `resolve_did` (2026-09-20 audit, outbound request confinement).
+    outbound
+        .check_did(issuer_did, insecure_http)
+        .map_err(|e| ValidationError::CatalogUnavailable(e.to_string()))?;
     let issuer_doc = dcp_core::resolve_did(http, issuer_did, insecure_http)
         .await
         .map_err(ValidationError::CatalogUnavailable)?;
     let endpoint = dcp_core::service_endpoint_url(&issuer_doc, "IssuerService")
         .map_err(ValidationError::CatalogUnavailable)?;
+    // The catalog endpoint itself comes from the resolved DID document, not
+    // this service's own configuration - checked before the GET below.
+    outbound
+        .check_url(&format!("{endpoint}/metadata"))
+        .map_err(|e| ValidationError::CatalogUnavailable(e.to_string()))?;
     let response = http
         .get(format!("{endpoint}/metadata"))
         .send()

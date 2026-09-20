@@ -23,6 +23,8 @@ use dcp_core::{
 };
 use serde_json::Value;
 
+use crate::outbound::OutboundPolicy;
+
 /// How far into the future an `nbf` claim may sit before a token is treated
 /// as not-yet-valid, to tolerate ordinary clock skew between this process
 /// and a genuinely legitimate caller's own clock - not a deliberate
@@ -66,6 +68,8 @@ pub enum AuthError {
     NestedTokenNotBoundToCaller,
     #[error("nested access token issuer '{0}' is not authoritative for this service's credentials")]
     NestedTokenIssuerNotAuthoritative(String),
+    #[error("outbound destination is not allowed: {0}")]
+    OutboundDestinationNotAllowed(String),
 }
 
 /// Extracts a Self-Issued ID Token from an `Authorization: Bearer <jwt>`
@@ -97,6 +101,7 @@ pub async fn verify_bearer_token(
     expected_audience: &str,
     insecure_http: bool,
     seen_jti: &Mutex<HashSet<String>>,
+    outbound: &OutboundPolicy,
 ) -> Result<Value, AuthError> {
     let token = authorization_header
         .and_then(|h| h.strip_prefix("Bearer "))
@@ -112,6 +117,15 @@ pub async fn verify_bearer_token(
         .get("kid")
         .and_then(Value::as_str)
         .ok_or_else(|| AuthError::InvalidSignature("token has no kid header".to_string()))?;
+
+    // 2026-09-20 independent security audit, Finding 4 (HIGH): an
+    // unauthenticated caller's own `iss` claim is entirely attacker-chosen,
+    // and this function must resolve it before it can check anything at
+    // all - so the destination is checked against the outbound allow-list
+    // *before* `resolve_did` is ever reached, not after.
+    outbound
+        .check_did(caller_did, insecure_http)
+        .map_err(|e| AuthError::OutboundDestinationNotAllowed(e.to_string()))?;
 
     let caller_doc = resolve_did(http, caller_did, insecure_http)
         .await
@@ -233,6 +247,7 @@ pub async fn verify_nested_access_token(
     outer_sub: &str,
     authoritative_issuer: &str,
     insecure_http: bool,
+    outbound: &OutboundPolicy,
 ) -> Result<Value, AuthError> {
     let (_, header, payload) = decode_jws_unverified(nested_token)
         .map_err(|e| AuthError::InvalidNestedToken(e.to_string()))?;
@@ -248,6 +263,15 @@ pub async fn verify_nested_access_token(
             nested_iss.to_string(),
         ));
     }
+
+    // Defence in depth (the authoritative-issuer check above already
+    // narrows `nested_iss` to exactly `authoritative_issuer`, so this can
+    // only ever reject when that party's own host somehow isn't
+    // allow-listed) - checked before `resolve_did`, mirroring
+    // `verify_bearer_token`'s own ordering.
+    outbound
+        .check_did(nested_iss, insecure_http)
+        .map_err(|e| AuthError::OutboundDestinationNotAllowed(e.to_string()))?;
 
     let issuer_doc = resolve_did(http, nested_iss, insecure_http)
         .await

@@ -61,6 +61,15 @@ struct CommonArgs {
     /// deployment.
     #[arg(long = "known-holder-pid")]
     known_holder_pids: Vec<String>,
+    /// An extra host (no port) this process is allowed to make outbound
+    /// HTTP requests to (may be repeated), on top of the hosts
+    /// `AppState::new` always derives from this process's own
+    /// configuration (its own `did_host`, `127.0.0.1`, and
+    /// `host.docker.internal`) - see `identity_hub_http::outbound` and
+    /// `Config::allowed_outbound_hosts`'s doc comment. Empty (the default)
+    /// is normally sufficient.
+    #[arg(long = "allow-resolve-host")]
+    allow_resolve_host: Vec<String>,
 }
 
 impl CommonArgs {
@@ -78,6 +87,7 @@ impl CommonArgs {
             insecure_http: self.insecure_http,
             trusted_issuer_dids: self.trusted_issuer_dids,
             known_holder_pids: self.known_holder_pids,
+            allowed_outbound_hosts: self.allow_resolve_host,
         }
     }
 }

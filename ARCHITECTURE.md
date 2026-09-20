@@ -31,10 +31,17 @@ that same nested-token check — a missing grant read as "no restriction"
 rather than "no access" (CRITICAL), an authenticity check with no
 accompanying authority check (CRITICAL), and this hub's own STS minting
 nested tokens its own verifier could never accept (MEDIUM) — all three
-fixed the same day; see "What's simplified or stubbed" and "DCP TCK
-conformance snapshot" below — 36 -> 22 -> 12 -> 11 -> 9 -> 8 -> 2 -> **0**
-real TCK failures across the first eight changes, each TDD'd and
-re-measured, not assumed, and 54/54 reconfirmed unchanged after the ninth)
+fixed the same day; then, a tenth change, the same audit's remaining
+outbound-request findings were fixed too: every outbound HTTP request this
+process makes (DID resolution, issued-credential delivery, offer-catalog
+metadata fetches) is now confined to an explicit, deny-by-default host
+allow-list derived from this service's own configuration
+(`identity_hub_http::outbound::OutboundPolicy`), and the shared `reqwest`
+client now carries a connect and total request timeout where before it had
+neither; see "What's simplified or stubbed" and "DCP TCK conformance
+snapshot" below — 36 -> 22 -> 12 -> 11 -> 9 -> 8 -> 2 -> **0** real TCK
+failures across the first eight changes, each TDD'd and re-measured, not
+assumed, and 54/54 reconfirmed unchanged after both the ninth and tenth)
 
 This file records the scope and design decisions behind this project's
 bootstrap, why each was made, and an honest accounting of what actually
@@ -624,6 +631,106 @@ including the first (wrong) fixes tried along the way).
   hardcoded `client_id`/`client_secret` pair
   (`Config::sts_client_id`/`sts_client_secret`), so anyone holding those
   credentials can still mint a grant for any scope.
+- **Outbound request confinement plus timeouts, added 2026-09-20 (tenth
+  change, closing the same independent security audit's Findings 4, 5, and
+  6).** Every outbound HTTP request this process makes is a `did:web`
+  resolution or a delivery whose *destination* is, at least in part, chosen
+  by the party being served rather than this service's own configuration:
+  `auth::verify_bearer_token` must resolve a caller's own `iss` before it
+  can check anything about it; `handlers::try_deliver_issued_credential`
+  reads its delivery destination straight out of the requester's own DID
+  document; `validation::verify_credential_proofs` resolves a credential's
+  own embedded `iss`; `validation::validate_offer_credentials` resolves an
+  offering issuer's DID and then its catalog endpoint. Before this change
+  none of the five were checked against anything at all, so any caller
+  could turn this process into an open proxy against a host of its choosing
+  (Findings 4 and 5, both HIGH), and none of them had a timeout, so a
+  destination that accepted a connection and then said nothing pinned the
+  handling task open indefinitely (Finding 6, MEDIUM).
+  - **The mechanism.** A new `identity_hub_http::outbound::OutboundPolicy`
+    (`crates/identity-hub-http/src/outbound.rs`) is a deny-by-default host
+    allow-list: `check_url` parses a destination, rejects any scheme but
+    `http`/`https`, and requires a **case-insensitive exact match on the
+    URL's host component — the port is ignored, and there is no wildcard,
+    suffix, or CIDR matching**; `check_did` runs the same check against
+    whatever URL `dcp_core::did_web_to_url` says a `did:web` DID resolves
+    to, without an extra parse path that could disagree with it.
+    Host-granularity (not host:port) is deliberate, not a looser fallback:
+    this crate's own test suite spawns stand-in DID servers on ephemeral
+    loopback ports, and the real TCK's own published port varies between
+    runs — host:port matching would reject those legitimate destinations
+    right along with a real one.
+  - **Where the allow-list comes from — a single source of truth.**
+    `AppState::new` (`src/state.rs`) builds the one `OutboundPolicy` this
+    process ever consults, from exactly: the host part of `config.did_host`
+    (this service must resolve, and be resolved as, itself); `127.0.0.1`
+    (the exact host `AppState::new` itself hosts `sts_party` at — see "The
+    STS-party identity" above — so this process can resolve its own
+    STS-party DID); `host.docker.internal`, pulled from the very same
+    `HOST_DOCKER_INTERNAL` constant the pre-existing static `reqwest` DNS
+    override already uses, so the two can never drift apart (see "A real
+    networking gotcha" below); and any operator-supplied extras from the
+    new `Config::allowed_outbound_hosts` (empty by default), wired to a new
+    repeatable `--allow-resolve-host` CLI flag.
+  - **Every enforcement point, checked before the network call.** All five
+    call sites above now take a `&OutboundPolicy` parameter and check it
+    immediately before their own `resolve_did`/`GET`/`POST` — mirroring
+    where Finding 2's authoritative-issuer check already sat relative to
+    its own `resolve_did`. `try_deliver_issued_credential` checks *twice*:
+    the holder's own DID before resolving it, and the resolved
+    `CredentialService` `serviceEndpoint` URL before the delivery `POST`.
+    `verify_bearer_token` and `verify_nested_access_token` map a rejection
+    through a new `AuthError::OutboundDestinationNotAllowed`, handled by
+    the same generic `auth_error_response` (`401`) every other `AuthError`
+    already uses — no new response path. `verify_credential_proofs` and
+    `validate_offer_credentials` map theirs to their existing
+    `ValidationError::UnverifiableProof`/`CatalogUnavailable` variants,
+    likewise with no new response path.
+  - **Timeouts.** `AppState::new`'s `reqwest::Client::builder()` now sets
+    `.connect_timeout(2s)` and `.timeout(5s total)` (named consts in
+    `src/state.rs`) — the one shared client every outbound call in this
+    process uses, so this covers DID resolution, the offer-catalog metadata
+    fetch, and credential delivery all at once. 5 seconds is far above
+    anything the real TCK actually needs (all of its traffic is loopback,
+    sub-millisecond); if a legitimate destination ever needs more, the fix
+    is to raise this value, not to remove the timeout.
+  - **The residual limitation, stated plainly.** `127.0.0.1` stays
+    allow-listed because `AppState::new` currently hosts the synthetic
+    `sts_party` identity there — so, in this bootstrap, an attacker-chosen
+    `iss` pointing at some *other* loopback service on the same host is
+    still technically reachable if one happens to be listening. This is not
+    fixed by this change, and isn't being claimed as fixed: a real
+    deployment gives `sts_party` a routable, non-loopback `did_host` (see
+    "The STS-party identity" above) and drops `127.0.0.1` from the
+    allow-list entirely — this bootstrap's own STS-party placement is the
+    thing keeping it there, exactly the same shape of trade-off "A real
+    networking gotcha" above documents for `host.docker.internal`.
+  - **TCK-safety was verified by running the real TCK repeatedly while
+    building this, not just once at the end** — the actual regression risk
+    this change carries is disagreeing with the TCK's own real resolution
+    pattern (`host.docker.internal` pinned to `127.0.0.1` by the
+    pre-existing DNS override) or with this crate's own test suite's
+    ephemeral-port DID servers, and both are exactly why host-only (not
+    host:port) matching was load-bearing rather than a simplification.
+
+  TDD'd: `tests/outbound_request_confinement.rs` (new) asserts all three
+  findings red-then-green against the real HTTP layer — an unauthenticated
+  caller's own attacker-chosen `iss` never reaches a probe listener on an
+  unconfigured host even though the request is still correctly rejected; a
+  requester's own DID document naming an unconfigured `CredentialService`
+  endpoint never receives the delivery POST, and the request still reaches
+  `REJECTED`; and a black hole on an *allow-listed* host (so the host check
+  alone can't pass this one vacuously) is given up on well within the
+  test's 20-second budget. `cargo test --workspace` stayed fully green
+  throughout, including every test file that spawns a stand-in DID server
+  on an ephemeral loopback port
+  (`nested_token_authorization`/`nested_access_token_authentication`/
+  `si_token_validation`/`storage_offer_auth`/`trusted_issuer_allowlist`/
+  `presentation_scope_enforcement`/`message_content_validation`). Real,
+  measured effect on TCK conformance: **54/54, unchanged**, confirmed
+  against the real TCK, reproduced identically three times — see "DCP TCK
+  conformance snapshot"; like the ninth change, this fix closed real,
+  TCK-invisible gaps, not TCK regressions.
 - **Trusted-issuer allow-list check, added 2026-09-20 (sixth change
   today).** `verify_bearer_token` accepting any `iss` whose `did:web`
   document resolves and whose key verifies the token's signature (and is
@@ -848,6 +955,22 @@ the same real TCK container and reproduced the identical 54/54 result
 three more times — the security fix closed real, TCK-invisible gaps, not
 TCK regressions, and did not change this table.
 
+**Reconfirmed unchanged again after a tenth, later change the same day**
+(see "What's simplified or stubbed"'s "Outbound request confinement plus
+timeouts" bullet): the same independent security audit's remaining
+findings — pre-auth SSRF via unvalidated `did:web` resolution, a second
+SSRF via an unvalidated issued-credential delivery endpoint, and no timeout
+on any outbound call — were fixed by a deny-by-default host allow-list
+(`identity_hub_http::outbound::OutboundPolicy`) plus a connect/total
+timeout on the shared `reqwest` client, none of which any TCK test
+exercises either. This was the highest-regression-risk change of the two
+security-audit passes, since the fix's entire mechanism sits directly on
+top of the real TCK's own `host.docker.internal`-pinned resolution path
+(see "A real networking gotcha" above) — so the real TCK was re-run
+repeatedly while building it, not just once at the end. Reproduced the
+identical 54/54 result three times after landing; did not change this
+table either.
+
 `tests/dcp_tck.rs`'s `dcp_tck_reports_full_credential_service_conformance`
 now asserts the TCK's own reported failure set is genuinely empty — not a
 count check, an assertion against the actual set of failing test method
@@ -914,9 +1037,12 @@ presentation_scope_enforcement` (the scope-escalation check), `cargo test
 -p identity-hub-http --test trusted_issuer_allowlist` (the trusted-issuer
 allow-list check), `cargo test -p identity-hub-http --test
 message_content_validation` (the message-content/business-logic checks),
-and `cargo test -p identity-hub-http --test
+`cargo test -p identity-hub-http --test
 nested_access_token_authentication` (the nested-token authentication
-check).
+check), `cargo test -p identity-hub-http --test nested_token_authorization`
+(the deny-by-default read authorization plus issuer-authority checks), and
+`cargo test -p identity-hub-http --test outbound_request_confinement` (the
+outbound host allow-list plus timeout checks).
 
 ## Continuous integration
 
@@ -983,11 +1109,18 @@ ds-identity-hub-rs/
         config.rs          Mode/Config: which role, bind address, own
                             did:web host, STS credentials, scope pattern,
                             trusted-issuer allow-list, known-holder-pid
-                            allow-list.
+                            allow-list, operator-supplied extra outbound
+                            hosts.
         state.rs           AppState: identity, STS-party identity, store,
-                            reqwest client (host.docker.internal override).
+                            reqwest client (host.docker.internal override,
+                            connect/total timeouts), the derived
+                            OutboundPolicy.
         auth.rs             Self-Issued ID Token validation, plus the
                             separate trusted-issuer allow-list check.
+        outbound.rs          OutboundPolicy: deny-by-default outbound-host
+                            allow-list (host-only match, no wildcard/CIDR)
+                            checked before every DID resolution/delivery/
+                            catalog-fetch call.
         validation.rs        Message-content/business-logic validation:
                             CredentialMessage status allow-list, known-
                             holderPid check, embedded-credential proof
@@ -1026,6 +1159,11 @@ ds-identity-hub-rs/
                                   issuer-authority checks on the
                                   Presentation API (2026-09-20 security
                                   audit Findings 1, 2, 9 — real HTTP, no
+                                  Docker/TCK needed).
+        outbound_request_confinement.rs
+                                  Outbound host allow-list plus timeout
+                                  checks (2026-09-20 security audit
+                                  Findings 4, 5, 6 — real HTTP, no
                                   Docker/TCK needed).
   vendor/
     contreforts-core/      Git submodule (contreforts-ai/contreforts-core),

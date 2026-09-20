@@ -140,6 +140,7 @@ async fn presentation_query(
         state.identity.own_did(),
         state.config.insecure_http,
         &state.seen_jti,
+        &state.outbound,
     )
     .await
     {
@@ -274,6 +275,7 @@ async fn granted_credential_types(
         outer_sub,
         state.sts_party.own_did(),
         state.config.insecure_http,
+        &state.outbound,
     )
     .await?;
     let granted_scope = nested_payload
@@ -352,6 +354,7 @@ async fn storage_write(
         state.identity.own_did(),
         state.config.insecure_http,
         &state.seen_jti,
+        &state.outbound,
     )
     .await
     {
@@ -371,6 +374,7 @@ async fn storage_write(
         &state.http,
         &message.credentials,
         state.config.insecure_http,
+        &state.outbound,
     )
     .await
     {
@@ -413,6 +417,7 @@ async fn credential_offer(
         state.identity.own_did(),
         state.config.insecure_http,
         &state.seen_jti,
+        &state.outbound,
     )
     .await
     {
@@ -427,6 +432,7 @@ async fn credential_offer(
         &message.issuer,
         &message.credentials,
         state.config.insecure_http,
+        &state.outbound,
     )
     .await
     {
@@ -466,6 +472,7 @@ async fn credential_request(
         state.identity.own_did(),
         state.config.insecure_http,
         &state.seen_jti,
+        &state.outbound,
     )
     .await
     {
@@ -574,9 +581,25 @@ async fn try_deliver_issued_credential(
     holder_did: &str,
     delivery_bearer: Option<String>,
 ) -> Result<(), String> {
+    // 2026-09-20 independent security audit, Finding 5 (HIGH): the holder's
+    // own DID is a value this service was itself asked to resolve as part
+    // of the Credential Request flow, but resolving it is still an
+    // outbound request to a destination the caller ultimately named -
+    // checked before `resolve_did`, mirroring `auth::verify_bearer_token`.
+    state
+        .outbound
+        .check_did(holder_did, state.config.insecure_http)
+        .map_err(|e| e.to_string())?;
     let holder_doc =
         dcp_core::resolve_did(&state.http, holder_did, state.config.insecure_http).await?;
     let endpoint = service_endpoint_url(&holder_doc, "CredentialService")?;
+    // The delivery destination itself is a string lifted verbatim out of
+    // the requester's own DID document - never validated before this fix
+    // (2026-09-20 audit, Finding 5). Checked before the POST below.
+    state
+        .outbound
+        .check_url(&endpoint)
+        .map_err(|e| e.to_string())?;
 
     let now = now_secs();
     let credential_type = state

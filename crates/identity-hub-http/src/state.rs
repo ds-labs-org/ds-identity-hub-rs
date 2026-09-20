@@ -1,5 +1,6 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Mutex;
+use std::time::Duration;
 
 use identity_hub_core::identity::ServiceIdentity;
 use identity_hub_core::messages::CredentialObject;
@@ -8,6 +9,25 @@ use identity_hub_core::store::InMemoryCredentialStore;
 use identity_hub_core::sts::StsConfig;
 
 use crate::config::{Config, Mode};
+use crate::outbound::OutboundPolicy;
+
+/// The one host every `host.docker.internal` reference in this process
+/// shares - both the static `reqwest` DNS override below and the
+/// derived outbound allow-list - so the two can never drift apart. See
+/// "A real networking gotcha" in `../../ARCHITECTURE.md` for why this host
+/// is resolved at all.
+const HOST_DOCKER_INTERNAL: &str = "host.docker.internal";
+
+/// How long this process's shared `reqwest::Client` waits to establish a
+/// TCP connection to any outbound destination before giving up - see
+/// `../../ARCHITECTURE.md`'s "What's simplified or stubbed" (the outbound
+/// timeouts entry) for why these specific values.
+const OUTBOUND_CONNECT_TIMEOUT: Duration = Duration::from_secs(2);
+/// The total time budget (including connect) for any single outbound
+/// request this process's shared `reqwest::Client` makes - covers DID
+/// resolution, issued-credential delivery, and the offer-catalog metadata
+/// fetch alike, since all three share this one client.
+const OUTBOUND_REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Tracks one accepted `CredentialRequestMessage` on the Issuer Service
 /// side, for `GET /requests/<id>` (Credential Request Status API).
@@ -43,6 +63,12 @@ pub struct AppState {
     /// rather than a configurable catalog (see `../../ARCHITECTURE.md`).
     pub supported_credential: CredentialObject,
     pub http: reqwest::Client,
+    /// Deny-by-default allow-list every outbound request this process makes
+    /// to a destination not entirely of its own choosing must be checked
+    /// against before the network call happens - see `crate::outbound`'s
+    /// module doc comment and this constructor's own comment on how it's
+    /// derived.
+    pub outbound: OutboundPolicy,
     /// `jti` values already accepted by `crate::auth::verify_bearer_token`,
     /// across every endpoint that calls it - process-lifetime only, per
     /// `../../ARCHITECTURE.md`'s "No durable storage": sufficient to satisfy
@@ -89,12 +115,42 @@ impl AppState {
         // host). `reqwest::ClientBuilder::resolve` overrides only the IP;
         // the port from the request URL is used unchanged.
         let http = reqwest::Client::builder()
+            .connect_timeout(OUTBOUND_CONNECT_TIMEOUT)
+            .timeout(OUTBOUND_REQUEST_TIMEOUT)
             .resolve(
-                "host.docker.internal",
+                HOST_DOCKER_INTERNAL,
                 std::net::SocketAddr::from(([127, 0, 0, 1], 0)),
             )
             .build()
             .expect("reqwest client with a static host.docker.internal override builds");
+
+        // The single source of truth for every host this process will ever
+        // make an outbound HTTP request to - see `crate::outbound`'s module
+        // doc comment for the matching rule and `../../ARCHITECTURE.md`'s
+        // "What's simplified or stubbed" for the full derivation reasoning
+        // and its one residual limitation (127.0.0.1 staying allow-listed
+        // for as long as `sts_party` is bootstrapped there).
+        let outbound_hosts = [
+            // This service's own externally-advertised did:web host - it
+            // must be able to resolve, and be resolved as, itself.
+            config
+                .did_host
+                .split(':')
+                .next()
+                .unwrap_or(config.did_host.as_str())
+                .to_string(),
+            // `sts_party` is bootstrapped at exactly this host (see above) -
+            // this process must be able to resolve its own STS-party DID.
+            "127.0.0.1".to_string(),
+            // The exact same host the reqwest DNS override above pins - see
+            // `HOST_DOCKER_INTERNAL`'s own doc comment for why this process
+            // needs to resolve it at all.
+            HOST_DOCKER_INTERNAL.to_string(),
+        ]
+        .into_iter()
+        .chain(config.allowed_outbound_hosts.iter().cloned());
+        let outbound = OutboundPolicy::new(outbound_hosts);
+
         Self {
             config,
             identity,
@@ -105,6 +161,7 @@ impl AppState {
             requests: Mutex::new(HashMap::new()),
             supported_credential,
             http,
+            outbound,
             seen_jti: Mutex::new(HashSet::new()),
         }
     }
