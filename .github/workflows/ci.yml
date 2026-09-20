@@ -53,13 +53,12 @@ jobs:
       # in-process instance of this crate's Credential Service - no mock,
       # no reimplementation of the TCK's own assertions.
       #
-      # This does NOT claim full DCP TCK conformance: see
-      # ARCHITECTURE.md, "DCP TCK conformance snapshot" for the real,
-      # date-stamped pass/fail counts and exactly what this bootstrap
-      # implements versus simplifies. The test asserts the exact,
-      # already-documented set of TCK failures that scope implies - see
-      # crates/identity-hub-http/tests/dcp_tck.rs for precisely which and
-      # why - so this job still gates merges: a real regression, or the TCK
-      # reporting a different failure set than documented, fails it.
+      # As of 2026-09-20 this asserts genuine full DCP TCK conformance for
+      # the Credential Service scope (54/54, zero real failures) - see
+      # ARCHITECTURE.md, "DCP TCK conformance snapshot" for the dated
+      # history of how this bootstrap got there, and
+      # crates/identity-hub-http/tests/dcp_tck.rs for the exact assertion
+      # (the TCK's reported failure set must be empty). This job still
+      # gates merges: any real regression fails it.
       - name: Run the DCP TCK conformance test
         run: cargo test -p identity-hub-http --test dcp_tck -- --ignored --nocapture
