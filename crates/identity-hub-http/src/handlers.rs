@@ -551,6 +551,18 @@ async fn deliver_issued_credential(
     holder_did: String,
     delivery_bearer: Option<String>,
 ) {
+    // Caps how many delivery tasks are doing outbound network I/O at once
+    // (`AppState::delivery_semaphore`, `state::MAX_IN_FLIGHT_DELIVERIES`) -
+    // acquired here, inside the spawned task, never on the request path, so
+    // the Credential Request API's own `201 Created` response is never
+    // delayed or refused by this. See `../../ARCHITECTURE.md`, "What's
+    // simplified or stubbed" (2026-09-20 independent security audit,
+    // MEDIUM).
+    let _permit = state
+        .delivery_semaphore
+        .acquire()
+        .await
+        .expect("delivery_semaphore is never closed");
     let outcome = try_deliver_issued_credential(
         &state,
         &request_id,

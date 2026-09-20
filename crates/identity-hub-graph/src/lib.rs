@@ -15,4 +15,6 @@ pub use model::{
     AcceptedOffer, CredentialBatch, CredentialEntry, NewAcceptedOffer, NewCredentialBatch,
     OfferedCredential,
 };
-pub use store::{CredentialGraph, CredentialGraphError};
+pub use store::{
+    CredentialGraph, CredentialGraphError, MAX_ACCEPTED_OFFERS, MAX_CREDENTIAL_BATCHES,
+};

@@ -54,11 +54,23 @@ empty (the TCK's own `dataspacetck.did.issuer` opt-in is unaffected — it
 was never empty), and `verify_credential_proofs` rejects any format it
 cannot verify outright instead of skipping it, while keeping both of the
 real TCK's own JWT format labels (`VC1_0_JWT`, `vc11-sl2021/jwt`, read out
-of `/app/tck-runtime.jar`, not guessed) accepted; see "What's simplified or
-stubbed" and "DCP TCK conformance snapshot" below — 36 -> 22 -> 12 -> 11 ->
-9 -> 8 -> 2 -> **0** real TCK failures across the first eight changes, each
-TDD'd and re-measured, not assumed, and 54/54 reconfirmed unchanged after
-the ninth, tenth, and eleventh)
+of `/app/tck-runtime.jar`, not guessed) accepted; then, a twelfth change the
+same day, the same audit's remaining MEDIUM finding was fixed: three
+attacker-reachable structures — `AppState::seen_jti`, `AppState::requests`,
+and the credential graph's accepted batches/offers
+(`CredentialGraph::add_batch`/`add_offer`) — grew for the lifetime of the
+process with nothing capping, expiring, or evicting them, so one
+counterparty allowed to call at all (even one refused on every single
+request, for `seen_jti`) could grow this process's memory without limit.
+All three now have a fixed, generous ceiling
+(`identity_hub_http::state::MAX_SEEN_JTI` = 4096,
+`MAX_TRACKED_REQUESTS` = 2048, `identity_hub_graph::MAX_CREDENTIAL_BATCHES`
+= 2048, `MAX_ACCEPTED_OFFERS` = 2048) with oldest-first eviction, orders of
+magnitude above anything a real DCP exchange or the full TCK run produces;
+see "What's simplified or stubbed" and "DCP TCK conformance snapshot" below
+— 36 -> 22 -> 12 -> 11 -> 9 -> 8 -> 2 -> **0** real TCK failures across the
+first eight changes, each TDD'd and re-measured, not assumed, and 54/54
+reconfirmed unchanged after the ninth, tenth, eleventh, and twelfth)
 
 This file records the scope and design decisions behind this project's
 bootstrap, why each was made, and an honest accounting of what actually
@@ -987,14 +999,79 @@ including the first (wrong) fixes tried along the way).
   upgrade, and is not meant to be read as one: the graph is opened with
   `Store::new()` (Oxigraph's in-memory backend), never persisted to disk,
   and still lives and dies with the process - exactly like the Issuer
-  Service's own request-tracking `HashMap`, which this change does not
-  touch. The value added is a native semantic runtime layer (real triples,
+  Service's own request-tracking table, which this change does not touch
+  (correction, 2026-09-20: that table was a bare `HashMap` when this bullet
+  was written; a later change the same day gave it, `seen_jti`, and this
+  graph's own batches/offers a fixed capacity instead - see "Bounded,
+  evicting growth for the three process-lifetime structures a remote caller
+  can grow" below. Still none of it is durable storage; the correction is
+  about size, not persistence). The value added is a native semantic
+  runtime layer (real triples,
   IRI addressing, SPARQL queryability, a genuine connector-interface
   round trip), not persistence across restarts. This mirrors
   `ds-sql-dps-rs/config-graph`'s own precedent and its own doc comment's
   reasoning almost verbatim: "there is no on-disk persistence requirement
   this small a config warrants yet" - the same call, made for the same
   reason, on a second project in this study.
+- **Bounded, evicting growth for the three process-lifetime structures a
+  remote caller can grow (2026-09-20, independent security audit, MEDIUM).**
+  Three attacker-reachable structures grew for the lifetime of the process
+  with nothing ever capping, expiring, or evicting them, so one counterparty
+  allowed to call at all could grow this process's memory without limit —
+  even one refused on every single request, for the first of the three,
+  since the write happens before the refusal:
+  - `AppState::seen_jti` (`identity-hub-http/src/auth.rs`, replay
+    protection) recorded every `jti` it ever saw, forever. Now a
+    fixed-capacity `SeenJtiCache` (`identity-hub-http/src/state.rs`) — a
+    `HashSet` paired with a `VecDeque` for insertion order — capped at
+    `MAX_SEEN_JTI` = 4096, oldest evicted first once exceeded. Replay
+    detection is unchanged for anything still remembered; a `jti` that has
+    aged out of the cache is (correctly) treated as unseen, since this was
+    never meant to be a durable revocation list — see `verify_bearer_token`'s
+    own doc comment for why that's still sufficient for this bootstrap's
+    process-lifetime scope.
+  - `AppState::requests` (`identity-hub-http/src/handlers.rs`, Credential
+    Request Status API) recorded one `RequestRecord` per accepted Credential
+    Request, forever, plus spawned one untracked `tokio::task` per request
+    with no limit on how many could be doing outbound delivery I/O at once.
+    Now a fixed-capacity `RequestTable` (same `HashMap` + `VecDeque` shape),
+    capped at `MAX_TRACKED_REQUESTS` = 2048; `GET /requests/<id>` for an
+    evicted id answers `404`, identically to an id that never existed. A new
+    `AppState::delivery_semaphore` (`tokio::sync::Semaphore`,
+    `MAX_IN_FLIGHT_DELIVERIES` = 32) separately bounds how many delivery
+    tasks may be doing outbound network I/O at once — acquired inside the
+    spawned task itself, never on the request path, so `POST
+    /requests`'s own `201 Created` response is never delayed or refused by
+    it; this is a concurrency bound, not a stored-structure cap, and changes
+    no protocol-visible behavior.
+  - The credential graph (`identity-hub-graph/src/store.rs`,
+    `CredentialGraph::add_batch`/`add_offer`) was append-only with no cap
+    and no dedupe, driven by the Storage API and the Credential Offer API.
+    Now each independently capped — `MAX_CREDENTIAL_BATCHES` = 2048,
+    `MAX_ACCEPTED_OFFERS` = 2048 — by a `trim_oldest` helper that deletes,
+    via a single SPARQL 1.1 `DELETE WHERE`, every quad of the oldest-by-
+    `ds:order` nodes past the cap *and* of each `ds:hasCredential`/
+    `ds:offersCredential` child blank node they point at, so no orphan
+    triples leak. `identity_hub_core::store::InMemoryCredentialStore` (the
+    Storage API's own backing store) needed no cap of its own: it reads and
+    writes through this same graph, so it inherits the bound for free —
+    confirmed by `identity-hub-core/tests/bounded_credential_store.rs`, not
+    assumed.
+
+  All four caps are deliberately generous — orders of magnitude above
+  anything a real DCP exchange, or a full `eclipsedataspacetck/dcp-tck-runtime`
+  run (a few hundred tokens, a few dozen batches/requests), ever produces —
+  so this is a fixed ceiling an attacker cannot push past, not a behavior
+  change for real traffic; confirmed, not assumed, by re-running the real
+  TCK after landing this fix (see "DCP TCK conformance snapshot"). TDD'd:
+  `identity-hub-http/tests/bounded_state_growth.rs`,
+  `identity-hub-graph/tests/bounded_graph_growth.rs`, and
+  `identity-hub-core/tests/bounded_credential_store.rs` each assert the
+  red-then-green bound plus a low-volume guard (16-32 operations evict
+  nothing, keep insertion order, and keep every id individually
+  addressable) and an oldest-first-eviction guard (the most recent entry of
+  each structure always survives; what's kept is always the newest
+  contiguous run).
 - **The Issuer Service supports exactly one hardcoded `CredentialObject`**
   (`MembershipCredential`), not a configurable catalog.
 - **Keys are generated fresh on every process start**, never persisted —
@@ -1098,6 +1175,19 @@ fixed without touching the real TCK's own explicit SUT configuration
 puts on the wire contains `"jwt"`, confirmed from `/app/tck-runtime.jar`,
 not guessed). Reproduced the identical 54/54 result three times after
 landing; did not change this table either.
+
+**Reconfirmed unchanged again after a twelfth, later change the same day**
+(see "What's simplified or stubbed"'s "Bounded, evicting growth for the
+three process-lifetime structures a remote caller can grow" bullet): the
+same independent security audit's remaining MEDIUM finding — `AppState::
+seen_jti`, `AppState::requests`, and the credential graph's accepted
+batches/offers all grew for the lifetime of the process with nothing
+capping or evicting them — was fixed with caps (4096/2048/2048/2048)
+generous enough that nothing the real TCK does ever approaches them: a full
+run produces a few hundred tokens and a few dozen batches/requests, three
+orders of magnitude below the smallest cap. Verified, not assumed — the
+real TCK was re-run against the fixed build and reproduced the identical
+54/54 result three times; did not change this table either.
 
 `tests/dcp_tck.rs`'s `dcp_tck_reports_full_credential_service_conformance`
 now asserts the TCK's own reported failure set is genuinely empty — not a
@@ -1211,6 +1301,15 @@ ds-identity-hub-rs/
                             surface (InMemoryCredentialStore, wrapping
                             identity-hub-graph), scope-to-type matcher, the
                             embedded STS. Built on ds-dcp-core-rs.
+      tests/
+        bounded_credential_store.rs
+                            Confirms InMemoryCredentialStore inherits
+                            identity-hub-graph's MAX_CREDENTIAL_BATCHES cap
+                            through its own public surface (store/all/
+                            credentials_of_types) - the shape POST
+                            /credentials actually goes through (2026-09-20
+                            security audit, MEDIUM - real HTTP not needed,
+                            drives the store directly).
     identity-hub-graph/    Embedded Oxigraph RDF store: accepted credential
                             batches and accepted credential offers as real,
                             SPARQL-addressable triples. Own domain types
@@ -1223,7 +1322,16 @@ ds-identity-hub-rs/
         model.rs            Plain input/output domain structs.
         store.rs             CredentialGraph: open_in_memory, add_batch/
                             batches/batch, add_offer/offers/offer,
-                            credentials_of_types.
+                            credentials_of_types, trim_oldest (the
+                            MAX_CREDENTIAL_BATCHES/MAX_ACCEPTED_OFFERS
+                            oldest-first eviction, 2026-09-20 security
+                            audit, MEDIUM).
+      tests/
+        bounded_graph_growth.rs
+                            add_batch/add_offer bounded-growth red-then-green
+                            plus low-volume/oldest-first-eviction guards
+                            (2026-09-20 security audit, MEDIUM - no Docker/
+                            TCK needed).
     identity-hub-contreforts/
                             Implements contreforts_core::ContrefortsConnector
                             for identity-hub-graph's CredentialGraph, with
@@ -1245,7 +1353,10 @@ ds-identity-hub-rs/
         state.rs           AppState: identity, STS-party identity, store,
                             reqwest client (host.docker.internal override,
                             connect/total timeouts), the derived
-                            OutboundPolicy.
+                            OutboundPolicy, the capped SeenJtiCache/
+                            RequestTable (MAX_SEEN_JTI/MAX_TRACKED_REQUESTS)
+                            and delivery_semaphore
+                            (MAX_IN_FLIGHT_DELIVERIES).
         auth.rs             Self-Issued ID Token validation, plus the
                             separate trusted-issuer allow-list check.
         outbound.rs          OutboundPolicy: deny-by-default outbound-host
@@ -1303,6 +1414,12 @@ ds-identity-hub-rs/
                                   regression guard (2026-09-20 security
                                   audit, remaining HIGH finding — real HTTP,
                                   no Docker/TCK needed).
+        bounded_state_growth.rs
+                                  AppState::seen_jti/requests bounded-growth
+                                  red-then-green plus low-volume/oldest-
+                                  first-eviction guards (2026-09-20 security
+                                  audit, remaining MEDIUM finding — real
+                                  HTTP, no Docker/TCK needed).
   vendor/
     contreforts-core/      Git submodule (contreforts-ai/contreforts-core),
                             pinned to commit 95a4940 - the same commit

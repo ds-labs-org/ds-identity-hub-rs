@@ -15,7 +15,6 @@
 //! its own doc comment and `../../ARCHITECTURE.md`'s "DCP TCK conformance
 //! snapshot" for exactly which TCK-caught gaps each of these closed.
 
-use std::collections::HashSet;
 use std::sync::Mutex;
 
 use dcp_core::{
@@ -24,6 +23,7 @@ use dcp_core::{
 use serde_json::Value;
 
 use crate::outbound::OutboundPolicy;
+use crate::state::SeenJtiCache;
 
 /// How far into the future an `nbf` claim may sit before a token is treated
 /// as not-yet-valid, to tolerate ordinary clock skew between this process
@@ -93,9 +93,12 @@ pub enum AuthError {
 /// - if `iat` is present, it is not in the future (with the same
 ///   [`NBF_LEEWAY_SECS`] clock-skew tolerance as `nbf` - a correctly-clocked
 ///   signer can never produce an issued-at timestamp ahead of "now");
-/// - `jti`, once seen in `seen_jti`, is never accepted again for the
-///   lifetime of this process (in-memory only - sufficient for this
-///   bootstrap's process-lifetime scope, see `../../ARCHITECTURE.md`).
+/// - `jti`, once seen in `seen_jti`, is never accepted again while it is
+///   still remembered (`seen_jti` is a fixed-capacity, oldest-evicted cache;
+///   see [`crate::state::SeenJtiCache`] and `../../ARCHITECTURE.md`'s
+///   "What's simplified or stubbed" for why a durable, unbounded set isn't
+///   needed: a real deployment's tokens are short-lived (5 minutes)
+///   relative to the cache's capacity).
 ///
 /// Returns the token's decoded JSON payload (`iss`/`sub`/`aud`/optionally
 /// `token`, ...) for the caller to inspect further.
@@ -104,7 +107,7 @@ pub async fn verify_bearer_token(
     authorization_header: Option<&str>,
     expected_audience: &str,
     insecure_http: bool,
-    seen_jti: &Mutex<HashSet<String>>,
+    seen_jti: &Mutex<SeenJtiCache>,
     outbound: &OutboundPolicy,
 ) -> Result<Value, AuthError> {
     let token = authorization_header
@@ -170,7 +173,7 @@ pub async fn verify_bearer_token(
 
     if let Some(jti) = payload.get("jti").and_then(Value::as_str) {
         let mut seen = seen_jti.lock().expect("seen_jti lock poisoned");
-        if !seen.insert(jti.to_string()) {
+        if !seen.insert(jti) {
             return Err(AuthError::TokenReplayed);
         }
     }

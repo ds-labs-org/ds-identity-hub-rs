@@ -54,7 +54,29 @@ pub enum CredentialGraphError {
     Query(#[from] oxigraph::sparql::QueryEvaluationError),
     #[error("SPARQL query failed to parse: {0}")]
     Syntax(#[from] oxigraph::sparql::SparqlSyntaxError),
+    #[error("SPARQL update failed: {0}")]
+    Update(#[from] oxigraph::sparql::UpdateEvaluationError),
 }
+
+/// The maximum number of accepted `CredentialMessage` batches
+/// [`CredentialGraph::add_batch`] keeps at once, oldest evicted first once
+/// exceeded - 2026-09-20 independent security audit, MEDIUM (unbounded
+/// process-lifetime growth: `add_batch` was append-only with no cap, so one
+/// counterparty allowed to write at all could grow this process's memory
+/// without limit). See `../../../ARCHITECTURE.md`, "What's simplified or
+/// stubbed", and `../tests/bounded_graph_growth.rs` for why this exact
+/// value: generous enough that no real traffic (including a full
+/// `dcp-tck-runtime` run, which produces a handful of batches) ever reaches
+/// it, while still a fixed ceiling a remote caller cannot push past.
+/// `identity_hub_core::store::InMemoryCredentialStore` (the Storage API's
+/// backing store) inherits this cap rather than growing a second one of its
+/// own, since it reads and writes through this same graph.
+pub const MAX_CREDENTIAL_BATCHES: usize = 2048;
+
+/// The same ceiling for accepted credential offers
+/// ([`CredentialGraph::add_offer`]), which arrive through a different API
+/// (`POST /offers`) but land in the same store and were equally unbounded.
+pub const MAX_ACCEPTED_OFFERS: usize = 2048;
 
 /// The credential graph: an embedded, in-process Oxigraph store. In-memory
 /// and process-lifetime only, by the same deliberate MVP call
@@ -102,6 +124,68 @@ impl CredentialGraph {
         self.next_order.fetch_add(1, Ordering::SeqCst)
     }
 
+    /// Counts the nodes of RDF type `class` (a full IRI) currently in the
+    /// store. Only ever called right after [`Self::trim_oldest`] has already
+    /// brought that class back to at most its cap, so this scan is bounded
+    /// by the cap itself (at most `cap + 1` nodes), not by however many have
+    /// ever been written - cheap to run on every insert.
+    fn count_of_type(&self, class: &str) -> Result<usize, CredentialGraphError> {
+        let query = format!(r#"SELECT (COUNT(?node) AS ?c) WHERE {{ ?node a <{class}> }}"#);
+        let count = self
+            .select(&query)?
+            .first()
+            .and_then(|row| row.get("c"))
+            .and_then(literal_value)
+            .and_then(|v| v.parse::<usize>().ok())
+            .unwrap_or(0);
+        Ok(count)
+    }
+
+    /// Enforces `cap` on the nodes of RDF type `class` (a full IRI),
+    /// oldest-first by their `ds:order` literal - the fixed eviction policy
+    /// behind [`MAX_CREDENTIAL_BATCHES`]/[`MAX_ACCEPTED_OFFERS`] (2026-09-20
+    /// independent security audit, MEDIUM). No-op when already at or under
+    /// `cap` (the overwhelmingly common case: this runs after every insert,
+    /// so there is at most one node to evict at a time once the cap has
+    /// first been reached).
+    ///
+    /// Deletes every quad of each evicted node *and* of each `child_predicate`
+    /// blank-node object it points at (a batch's `ds:hasCredential`
+    /// credentials, an offer's `ds:offersCredential` offered credentials) -
+    /// otherwise those child triples would leak as orphans that no `SELECT`
+    /// in [`Self::batches`]/[`Self::offers`] ever re-surfaces, but that
+    /// still occupy space. Implemented as a single SPARQL 1.1 `DELETE WHERE`
+    /// so eviction and the query that picks *which* nodes are oldest run
+    /// atomically against the same store, without ever naming a stored
+    /// blank node by a syntactic label (blank node identity is preserved by
+    /// staying inside one query, per the module doc comment's reasoning for
+    /// why this store treats blank nodes as opaque).
+    fn trim_oldest(
+        &self,
+        class: &str,
+        child_predicate: &str,
+        cap: usize,
+    ) -> Result<(), CredentialGraphError> {
+        let count = self.count_of_type(class)?;
+        let Some(excess) = count.checked_sub(cap).filter(|&e| e > 0) else {
+            return Ok(());
+        };
+        let order = ds("order");
+        let update = format!(
+            r#"DELETE {{ ?node ?np ?no . ?child ?cp ?co . }}
+               WHERE {{
+                   {{ SELECT ?node WHERE {{ ?node a <{class}> ; <{order}> ?order . }} ORDER BY ASC(?order) LIMIT {excess} }}
+                   ?node ?np ?no .
+                   OPTIONAL {{ ?node <{child_predicate}> ?child . ?child ?cp ?co . }}
+               }}"#
+        );
+        SparqlEvaluator::new()
+            .parse_update(&update)?
+            .on_store(&self.store)
+            .execute()?;
+        Ok(())
+    }
+
     fn select(&self, query: &str) -> Result<Vec<QuerySolution>, CredentialGraphError> {
         let results = SparqlEvaluator::new()
             .parse_query(query)?
@@ -134,6 +218,14 @@ impl CredentialGraph {
     /// of shape (see [`decode_payload`]). Returns the batch id the graph
     /// minted, usable with [`Self::batch`] and by
     /// `identity-hub-contreforts`'s connector as a `remote_id`.
+    ///
+    /// Capped at [`MAX_CREDENTIAL_BATCHES`]: once the insert above brings the
+    /// store past that many `ds:CredentialBatch` nodes, [`Self::trim_oldest`]
+    /// evicts the oldest batches (by `ds:order`) - and every quad of their
+    /// `ds:hasCredential` children - back down to the cap before this
+    /// returns (2026-09-20 independent security audit, MEDIUM: this was
+    /// append-only with no cap, so one counterparty allowed to write at all
+    /// could grow this process's memory without limit).
     pub fn add_batch(&self, batch: NewCredentialBatch) -> Result<String, CredentialGraphError> {
         let id = Uuid::new_v4().to_string();
         let node = BlankNode::default();
@@ -232,6 +324,11 @@ impl CredentialGraph {
         for quad in &quads {
             self.store.insert(quad)?;
         }
+        self.trim_oldest(
+            &ds("CredentialBatch"),
+            &ds("hasCredential"),
+            MAX_CREDENTIAL_BATCHES,
+        )?;
         Ok(id)
     }
 
@@ -368,6 +465,10 @@ impl CredentialGraph {
     /// genuinely fits here, unlike the container-level fields `add_batch`
     /// keeps in `ds:`) and, per offered `CredentialObject`, a small node
     /// recording its catalog id and (when present) credential type.
+    ///
+    /// Capped at [`MAX_ACCEPTED_OFFERS`], the same eviction policy as
+    /// [`Self::add_batch`] (2026-09-20 independent security audit, MEDIUM) -
+    /// see that method's own doc comment.
     pub fn add_offer(&self, offer: NewAcceptedOffer) -> Result<String, CredentialGraphError> {
         let id = Uuid::new_v4().to_string();
         let node = BlankNode::default();
@@ -432,6 +533,11 @@ impl CredentialGraph {
         for quad in &quads {
             self.store.insert(quad)?;
         }
+        self.trim_oldest(
+            &ds("AcceptedCredentialOffer"),
+            &ds("offersCredential"),
+            MAX_ACCEPTED_OFFERS,
+        )?;
         Ok(id)
     }
 
