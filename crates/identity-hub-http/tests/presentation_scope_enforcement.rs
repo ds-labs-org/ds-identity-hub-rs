@@ -306,16 +306,20 @@ async fn presentation_query_returns_everything_within_a_broad_grant() {
     assert_eq!(markers, expected);
 }
 
-/// Regression guard: a caller with no nested `token` claim at all (this
-/// bootstrap's pre-existing, unauthenticated-scope behavior - see
-/// `../../ARCHITECTURE.md`'s "No nested-access-token validation") is not
-/// newly broken by this change: with nothing to check the requested scope
-/// against, the existing requested-type-only lookup still applies. This is
-/// a deliberate, documented default (see this module's own top doc
-/// comment), not evidence a bare outer envelope should ever be trusted
-/// with a real access grant in a production deployment.
+/// A caller with no nested `token` claim at all must be granted nothing.
+///
+/// This assertion is **inverted** relative to what this module originally
+/// asserted (`assert_eq!(markers, vec![MEMBERSHIP_MARKER])`, documented as
+/// "this bootstrap's pre-existing, unauthenticated-scope behavior"). The
+/// 2026-09-20 security audit's Finding 1 (CRITICAL) identified that
+/// behavior as a read-authorization bypass: with no grant to intersect
+/// against, `presentation_query` fell through to the requested types
+/// unfiltered, so a caller that presents *no* grant outranks one that
+/// presents a narrow one. The intersection of "what you asked for" with
+/// "what you can prove you were granted" is empty when you prove nothing.
+/// See `nested_token_authorization.rs` for the full RED account.
 #[tokio::test]
-async fn presentation_query_without_a_nested_token_keeps_the_pre_existing_behavior() {
+async fn presentation_query_without_a_nested_token_grants_nothing() {
     let (state, base) = spawn_credential_service().await;
     seed_both_credential_types(&state);
     let caller = spawn_caller_identity("holder").await;
@@ -323,7 +327,14 @@ async fn presentation_query_without_a_nested_token_keeps_the_pre_existing_behavi
     let outer = mint_outer_envelope(&caller, state.identity.own_did(), None);
 
     let response = query(&base, &outer, &[MEMBERSHIP_SCOPE]).await;
-    assert_eq!(response.status(), reqwest::StatusCode::OK);
+    let status = response.status();
+    if status.is_client_error() {
+        return;
+    }
+    assert!(status.is_success(), "unexpected status {status}");
     let markers = returned_markers(response).await;
-    assert_eq!(markers, vec![MEMBERSHIP_MARKER.to_string()]);
+    assert!(
+        markers.is_empty(),
+        "a bare outer envelope proves no grant, so it must be handed nothing - got {markers:?}"
+    );
 }

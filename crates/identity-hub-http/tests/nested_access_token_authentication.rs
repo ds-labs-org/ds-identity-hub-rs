@@ -313,12 +313,22 @@ async fn presentation_query_rejects_an_expired_nested_token() {
     );
 }
 
-/// Regression guard: a request with no nested `token` claim at all keeps
-/// this bootstrap's pre-existing, deliberately permissive default (the
-/// bare-outer-envelope case is not one of the two gaps this module closes -
-/// see `presentation_scope_enforcement.rs`'s own identical guard).
+/// A request with no nested `token` claim at all must disclose nothing.
+///
+/// This assertion is **inverted** relative to what this module originally
+/// asserted. Until the 2026-09-20 security audit it read
+/// `assert_eq!(status, OK)` and was documented as "this bootstrap's
+/// pre-existing, deliberately permissive default" - which the audit's
+/// Finding 1 (CRITICAL) identified as a read-authorization bypass, not a
+/// default: `handlers::granted_credential_types` returns `Ok(None)` for a
+/// missing `token` claim and `presentation_query` reads `Ok(None)` as "no
+/// restriction", so omitting a grant entirely is *more* powerful than
+/// presenting a narrow one. See `nested_token_authorization.rs` for the
+/// full RED account of all three audit findings this closes, and for why
+/// denying here cannot regress the 54/54 TCK baseline (no TCK presentation
+/// test presents a bare envelope and expects a successful presentation).
 #[tokio::test]
-async fn presentation_query_without_a_nested_token_still_succeeds() {
+async fn presentation_query_without_a_nested_token_discloses_nothing() {
     let (state, base) = spawn_credential_service().await;
     seed_membership_credential(&state);
     let verifier = spawn_identity("verifier").await;
@@ -326,5 +336,22 @@ async fn presentation_query_without_a_nested_token_still_succeeds() {
     let outer = mint_outer_envelope(&verifier, state.identity.own_did(), None);
 
     let response = query(&base, &outer).await;
-    assert_eq!(response.status(), reqwest::StatusCode::OK);
+    let status = response.status();
+    if status.is_client_error() {
+        return;
+    }
+    assert!(status.is_success(), "unexpected status {status}");
+    let body: Value = response.json().await.expect("response is JSON");
+    let vp_jws = body["presentation"][0]
+        .as_str()
+        .expect("presentation entry is a JWS string");
+    let (_, _, vp_payload) = dcp_core::decode_jws_unverified(vp_jws).expect("valid VP JWS");
+    let credentials = vp_payload["vp"]["verifiableCredential"]
+        .as_array()
+        .expect("verifiableCredential array");
+    assert!(
+        credentials.is_empty(),
+        "a bare outer envelope carries no verifiable grant, so it must disclose nothing - \
+         got {credentials:?}"
+    );
 }
