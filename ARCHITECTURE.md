@@ -67,10 +67,20 @@ All three now have a fixed, generous ceiling
 `MAX_TRACKED_REQUESTS` = 2048, `identity_hub_graph::MAX_CREDENTIAL_BATCHES`
 = 2048, `MAX_ACCEPTED_OFFERS` = 2048) with oldest-first eviction, orders of
 magnitude above anything a real DCP exchange or the full TCK run produces;
-see "What's simplified or stubbed" and "DCP TCK conformance snapshot" below
+then, a thirteenth change the same day, the same audit's remaining MEDIUM
+finding was fixed: `CommonArgs::insecure_http` was a bare `bool` clap field
+(`ArgAction::SetTrue`), so no command line could ever reach
+`insecure_http == false` — the binary had no way to do HTTPS `did:web`
+resolution at all, regardless of operator intent. Now
+`#[arg(long, action = clap::ArgAction::Set, default_value_t = true)]`, so
+`--insecure-http false` (or `--insecure-http=false`) works identically for
+both subcommands, while a bare invocation with no scheme flag still
+defaults to `insecure_http == true` unchanged; see "What's simplified or
+stubbed" and "DCP TCK conformance snapshot" below
 — 36 -> 22 -> 12 -> 11 -> 9 -> 8 -> 2 -> **0** real TCK failures across the
 first eight changes, each TDD'd and re-measured, not assumed, and 54/54
-reconfirmed unchanged after the ninth, tenth, eleventh, and twelfth)
+reconfirmed unchanged after the ninth, tenth, eleventh, twelfth, and
+thirteenth)
 
 This file records the scope and design decisions behind this project's
 bootstrap, why each was made, and an honest accounting of what actually
@@ -1072,6 +1082,35 @@ including the first (wrong) fixes tried along the way).
   addressable) and an oldest-first-eviction guard (the most recent entry of
   each structure always survives; what's kept is always the newest
   contiguous run).
+- **`--insecure-http` can now actually be turned off (2026-09-20,
+  independent security audit, MEDIUM).** `CommonArgs::insecure_http`
+  (`crates/identity-hub-http/src/main.rs`) was a bare `bool` field, for
+  which clap derives `ArgAction::SetTrue`: the flag takes no value, and
+  combined with `default_value_t = true` the parsed value was `true`
+  whether the flag was given or not — clap generates no
+  `--no-insecure-http` counterpart for a `SetTrue` field (only for
+  `SetFalse`), so `--insecure-http false`, `--insecure-http=false`, and
+  `--no-insecure-http` were all rejected outright. Concretely, this meant
+  the binary had no command line, ever, to make `Config::scheme()` resolve
+  to `"https"` — every `did:web` resolution it performs
+  (`auth::verify_bearer_token`, `validation`'s issuer checks,
+  `outbound::check_did`) and its own advertised `serviceEndpoint` were
+  stuck on plain, unauthenticated HTTP, contrary to what "Running it"
+  below used to imply by only ever documenting the default. Now
+  `#[arg(long, action = clap::ArgAction::Set, default_value_t = true)]`:
+  `--insecure-http false` (and `--insecure-http=false`) parse successfully
+  and reach `insecure_http == false` / `scheme() == "https"` for both
+  `credential-service` and `issuer-service`, since the field lives on the
+  shared `CommonArgs`. The permissive default is unchanged and stays out
+  of scope — a bare invocation with no scheme flag at all still parses to
+  `insecure_http == true`, matching this bootstrap's local/test-only
+  posture, `Config::for_test` (untouched), and every existing invocation
+  in `ARCHITECTURE.md`, the TCK harness, and `bench/`. TDD'd:
+  `crates/identity-hub-http/src/main.rs`'s `#[cfg(test)] mod
+  cli_scheme_switch_tests` (in-binary, not a separate `tests/` file)
+  asserts the off-switch reaches `insecure_http == false` /
+  `scheme() == "https"` / an `https://`-prefixed `base_url()` for both
+  subcommands, and that the bare-invocation default is unchanged for both.
 - **The Issuer Service supports exactly one hardcoded `CredentialObject`**
   (`MembershipCredential`), not a configurable catalog.
 - **Keys are generated fresh on every process start**, never persisted —
@@ -1188,6 +1227,18 @@ run produces a few hundred tokens and a few dozen batches/requests, three
 orders of magnitude below the smallest cap. Verified, not assumed — the
 real TCK was re-run against the fixed build and reproduced the identical
 54/54 result three times; did not change this table either.
+
+**Reconfirmed unchanged again after a thirteenth, later change the same
+day** (see "What's simplified or stubbed"'s "`--insecure-http` can now
+actually be turned off" bullet): the same independent security audit's
+last remaining finding — a bare `bool` `insecure_http` CLI field that no
+command line could ever set to `false`, leaving this binary no way to do
+HTTPS `did:web` resolution at all — was fixed by switching the field to
+`clap::ArgAction::Set`. The real TCK's own `Config` is built by
+`Config::for_test`, not the CLI, so this change touches no code path the
+TCK exercises; re-run against the fixed build twice, reproducing the
+identical 54/54 result both times, confirming rather than assuming that.
+Did not change this table.
 
 `tests/dcp_tck.rs`'s `dcp_tck_reports_full_credential_service_conformance`
 now asserts the TCK's own reported failure set is genuinely empty — not a
@@ -1372,6 +1423,10 @@ ds-identity-hub-rs/
         main.rs             CLI: `identity-hub credential-service|issuer-service`;
                             also runs the one-off Contreforts round-trip
                             proof at startup (Credential Service mode).
+                            Its own `#[cfg(test)] mod cli_scheme_switch_tests`
+                            (in-binary, not under `tests/`) covers the
+                            `--insecure-http` off-switch (2026-09-20
+                            security audit, MEDIUM).
       tests/
         dcp_tck.rs               Real dcp-tck-runtime conformance test.
         dcp.tck.properties       TCK config, bind-mounted into the container.
@@ -1460,7 +1515,16 @@ embedded in its own `did:web` identity and advertised service endpoint (see
 `Config`'s doc comment in `crates/identity-hub-http/src/config.rs`).
 `--sts-client-id`/`--sts-client-secret` default to `tck-client`/
 `tck-secret`; `--insecure-http` (plain HTTP `did:web` resolution) defaults
-to `true`, matching this bootstrap's local/test-only scope.
+to `true`, matching this bootstrap's local/test-only scope, and can now be
+turned off with `--insecure-http false` (or `--insecure-http=false`) to
+switch every `did:web` resolution this process performs, and the
+`serviceEndpoint` it advertises in its own DID document, to HTTPS
+(2026-09-20 fix, MEDIUM - previously `--insecure-http` was a bare `bool`
+flag that clap gives no way to set to `false` on any command line, so this
+binary had no way to do HTTPS `did:web` resolution at all; see
+`CommonArgs::insecure_http`'s doc comment in
+`crates/identity-hub-http/src/main.rs` and the "What's simplified or
+stubbed" entry below).
 `--trusted-issuer-did` (repeatable) populates `Config::trusted_issuer_dids`
 for a Credential Service's Storage/Offer APIs; omitted, it defaults to
 empty, which (2026-09-20 fix, HIGH) means **no issuer is trusted** - the

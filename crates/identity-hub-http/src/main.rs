@@ -44,8 +44,15 @@ struct CommonArgs {
     #[arg(long, default_value = DEFAULT_SCOPE_PATTERN)]
     scope_pattern: String,
     /// Resolve/advertise `did:web` over plain HTTP instead of HTTPS - for
-    /// local/test environments only.
-    #[arg(long, default_value_t = true)]
+    /// local/test environments only. Defaults to `true` (unchanged); pass
+    /// `--insecure-http false` (or `--insecure-http=false`) to turn it off
+    /// and switch every `did:web` resolution this process performs, and
+    /// the `serviceEndpoint` it advertises in its own DID document, to
+    /// HTTPS (2026-09-20 fix, MEDIUM: previously a bare `bool` field, for
+    /// which clap derives `ArgAction::SetTrue` - the flag took no value
+    /// and there was no way, on any command line, to reach
+    /// `insecure_http == false`; see `cli_scheme_switch_tests` below).
+    #[arg(long, action = clap::ArgAction::Set, default_value_t = true)]
     insecure_http: bool,
     /// A DID trusted to deliver a `CredentialMessage`/`CredentialOfferMessage`
     /// to this Credential Service (may be repeated). Empty (the default)
