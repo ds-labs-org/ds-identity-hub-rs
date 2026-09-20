@@ -4,7 +4,8 @@
 //! named by the JWS `kid` header, verify the signature, check that the
 //! signing key is actually authorized to invoke a capability
 //! (`capabilityInvocation`), then check `iss == sub`, `aud`, `exp`, `nbf`,
-//! and `jti` replay. Every one of these is now real - see
+//! `iat` (not in the future), and `jti` replay. Every one of these is now
+//! real - see
 //! `../../ARCHITECTURE.md`'s "DCP TCK conformance snapshot" for exactly
 //! which TCK-caught gaps this closed and which (a trusted-issuer allow-list,
 //! scope-escalation enforcement, message-content validation) remain out of
@@ -41,6 +42,8 @@ pub enum AuthError {
     IssuerSubjectMismatch,
     #[error("token is not yet valid (nbf is in the future)")]
     NotYetValid,
+    #[error("token iat (issued-at) is in the future")]
+    IssuedInFuture,
     #[error(
         "signing key '{0}' is not listed under the caller's own capabilityInvocation verification relationship"
     )]
@@ -63,6 +66,9 @@ pub enum AuthError {
 /// - `aud` matches `expected_audience` (this service's own DID);
 /// - the token is not expired (`exp`) and, if `nbf` is present, not yet
 ///   valid (with [`NBF_LEEWAY_SECS`] of clock-skew tolerance);
+/// - if `iat` is present, it is not in the future (with the same
+///   [`NBF_LEEWAY_SECS`] clock-skew tolerance as `nbf` - a correctly-clocked
+///   signer can never produce an issued-at timestamp ahead of "now");
 /// - `jti`, once seen in `seen_jti`, is never accepted again for the
 ///   lifetime of this process (in-memory only - sufficient for this
 ///   bootstrap's process-lifetime scope, see `../../ARCHITECTURE.md`).
@@ -120,6 +126,12 @@ pub async fn verify_bearer_token(
         && nbf > now_secs() + NBF_LEEWAY_SECS
     {
         return Err(AuthError::NotYetValid);
+    }
+
+    if let Some(iat) = payload.get("iat").and_then(Value::as_u64)
+        && iat > now_secs() + NBF_LEEWAY_SECS
+    {
+        return Err(AuthError::IssuedInFuture);
     }
 
     if let Some(jti) = payload.get("jti").and_then(Value::as_str) {

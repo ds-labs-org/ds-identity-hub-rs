@@ -202,6 +202,69 @@ async fn storage_write_rejects_token_not_yet_valid() {
     assert!(state.store.all().is_empty());
 }
 
+// ---- iat ----
+
+#[tokio::test]
+async fn storage_write_rejects_token_with_iat_in_the_future() {
+    let (state, base) = spawn_credential_service().await;
+    let caller = spawn_caller_identity("issuer").await;
+    let now = dcp_core::now_secs();
+    // Otherwise entirely well-formed (iss==sub, nbf valid, not expired) -
+    // the only thing wrong is `iat` claiming the token was issued an hour
+    // from now, which a correctly-clocked signer could never produce.
+    let payload = json!({
+        "iss": caller.own_did(),
+        "sub": caller.own_did(),
+        "aud": AUD,
+        "iat": now + 3600, // an hour in the future
+        "nbf": now,
+        "exp": now + 7200,
+        "jti": uuid::Uuid::new_v4().to_string(),
+    });
+    let token = sign(&caller, payload);
+    let response = post(
+        &format!("{base}/credentials"),
+        &token,
+        &credential_message_body(),
+    )
+    .await
+    .expect("request completes");
+    assert_eq!(response.status(), reqwest::StatusCode::UNAUTHORIZED);
+    assert!(
+        state.store.all().is_empty(),
+        "a token with iat in the future must never reach the store"
+    );
+}
+
+#[tokio::test]
+async fn storage_write_accepts_a_token_with_iat_within_clock_skew_leeway() {
+    // Regression guard: the same clock-skew leeway nbf already tolerates
+    // must also apply to iat, so an ordinary, legitimately-clocked caller a
+    // few seconds ahead of this process is not rejected.
+    let (state, base) = spawn_credential_service().await;
+    let caller = spawn_caller_identity("issuer").await;
+    let now = dcp_core::now_secs();
+    let payload = json!({
+        "iss": caller.own_did(),
+        "sub": caller.own_did(),
+        "aud": AUD,
+        "iat": now + 5,
+        "nbf": now,
+        "exp": now + 300,
+        "jti": uuid::Uuid::new_v4().to_string(),
+    });
+    let token = sign(&caller, payload);
+    let response = post(
+        &format!("{base}/credentials"),
+        &token,
+        &credential_message_body(),
+    )
+    .await
+    .expect("request completes");
+    assert_eq!(response.status(), reqwest::StatusCode::OK);
+    assert_eq!(state.store.all().len(), 1);
+}
+
 // ---- capabilityInvocation ----
 
 #[tokio::test]

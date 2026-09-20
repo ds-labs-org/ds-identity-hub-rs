@@ -3,18 +3,18 @@
 **Status:** Bootstrap, working end to end against the real TCK (see "DCP TCK
 conformance snapshot" below). Not yet integrated with a live dataspace
 control plane, a real key-management/HSM backend, or a persistent store.
-**Date:** 2026-09-20 (four changes today: real per-request authorization
+**Date:** 2026-09-20 (five changes today: real per-request authorization
 added to the Storage API and Credential Offer API; then `verify_bearer_token`
 gained `iss == sub`, `nbf`, `capabilityInvocation`, and `jti`-replay checks;
 then the Presentation API gained scope-escalation enforcement against the
-caller's own nested access-token grant; see "What's simplified or stubbed"
-and "DCP TCK conformance snapshot" below — 36 -> 22 -> 12 -> 11 real TCK
-failures, each step TDD'd and re-measured, not assumed; then, separately
-from TCK conformance, the Storage API's credential store and the
-Credential Offer API's accepted-offer record were rebuilt on a
-Contreforts-backed semantic RDF graph — see "Provenance: Contreforts";
-still 43/54 real TCK conformance, unchanged, confirmed by re-running it
-after this change)
+caller's own nested access-token grant; then, separately from TCK
+conformance, the Storage API's credential store and the Credential Offer
+API's accepted-offer record were rebuilt on a Contreforts-backed semantic
+RDF graph — see "Provenance: Contreforts"; then `verify_bearer_token`
+additionally rejects an `iat` (issued-at) claim in the future; see "What's
+simplified or stubbed" and "DCP TCK conformance snapshot" below — 36 -> 22
+-> 12 -> 11 -> 9 real TCK failures, each step TDD'd and re-measured, not
+assumed)
 
 This file records the scope and design decisions behind this project's
 bootstrap, why each was made, and an honest accounting of what actually
@@ -489,15 +489,27 @@ including the first (wrong) fixes tried along the way).
   issuer (the DCP spec's own "Verify Trust" step, above and beyond
   signature verification). Invisible before the first 2026-09-20 change
   (the Storage API accepted everything regardless of `iss`); now a real,
-  distinct, TCK-caught gap, unchanged by today's second change
-  (`cs_06_05_01_credentialMessage_untrustedIssuer`).
-- **`iat` (issued-at) in the future is not checked.** A real, distinct gap
-  from the four checks added today (which were `iss == sub`, `nbf`,
-  `capabilityInvocation`, and `jti` replay specifically, per this change's
-  own scope) — the TCK probes `iat` on the Storage/Offer APIs but not the
-  Presentation API, so this is visible only there
-  (`cs_06_05_01_credentialMessage_iatInFuture`,
-  `cs_06_06_01_credentialOfferMessage_iatInFuture`).
+  distinct, TCK-caught gap, unchanged by today's second, third and fourth
+  changes (`cs_06_05_01_credentialMessage_untrustedIssuer`).
+- **`iat` (issued-at) in the future check, added 2026-09-20 (fourth change
+  today).** `verify_bearer_token` (`identity-hub-http/src/auth.rs`) now
+  also rejects a token whose `iat` claim is in the future, using the same
+  clock-skew leeway (`NBF_LEEWAY_SECS`) the existing `nbf` check already
+  used — a real, distinct gap from the four checks the second change added
+  (which were `iss == sub`, `nbf`, `capabilityInvocation`, and `jti` replay
+  specifically, per that change's own scope; `iat` was never one of them).
+  The TCK probes `iat` only on the Storage/Offer APIs, not the Presentation
+  API, so this was visible only there. TDD'd:
+  `tests/si_token_validation.rs` asserts the rejection red-then-green
+  (`storage_write_rejects_token_with_iat_in_the_future`), plus a regression
+  guard that an `iat` a few seconds ahead of this process's own clock (well
+  within the leeway) is still accepted
+  (`storage_write_accepts_a_token_with_iat_within_clock_skew_leeway`).
+  Real, measured effect on TCK conformance: closed exactly
+  `cs_06_05_01_credentialMessage_iatInFuture` and
+  `cs_06_06_01_credentialOfferMessage_iatInFuture` (11 -> 9), confirmed
+  against the real TCK, reproduced identically twice, with zero regressions
+  on the other 45 tests (the 43 previously passing plus these 2).
 - **No message-content/business-logic validation on the Storage API or
   Credential Offer API**, independent of the wrapping Self-Issued ID Token:
   no schema/enum validation of the `CredentialMessage`/
@@ -565,17 +577,18 @@ including the first (wrong) fixes tried along the way).
 ## DCP TCK conformance snapshot
 
 **Run against a real, locally running `eclipsedataspacetck/dcp-tck-runtime:latest`
-container — 2026-09-20**, after three changes today: adding real
+container — 2026-09-20**, after four changes today: adding real
 per-request authorization to the Storage API and Credential Offer API;
 adding the `iss == sub`/`nbf`/`capabilityInvocation`/`jti`-replay checks to
-`verify_bearer_token`; then adding scope-escalation enforcement to
-`presentation_query` against the caller's own nested access-token grant
-(see "What's simplified or stubbed" for all three). Not fabricated:
+`verify_bearer_token`; adding scope-escalation enforcement to
+`presentation_query` against the caller's own nested access-token grant;
+then adding an `iat`-in-the-future check to `verify_bearer_token` (see
+"What's simplified or stubbed" for all four). Not fabricated:
 `tests/dcp_tck.rs` boots this crate's real Credential Service in-process
 and drives the actual, official TCK container against it via
 `testcontainers`, exactly as it runs in CI. Reproduced identically twice
-with an 11-failure set immediately after the third change (and the prior
-12-failure result was itself reproduced twice before that change, per the
+with a 9-failure set immediately after the fourth change (and the prior
+11-failure result was itself reproduced twice before that change, per the
 previous snapshot) before being written down here.
 
 Scoped to the Credential Service test packages
@@ -585,88 +598,80 @@ Scoped to the Credential Service test packages
 | Test package | Total | Passed | Failed |
 |---|---:|---:|---:|
 | `presentation.cs` (VPP) | 23 | 21 | 2 |
-| `issuance.cs` (CIP) | 31 | 22 | 9 |
-| **Total** | **54** | **43** | **11** |
+| `issuance.cs` (CIP) | 31 | 24 | 7 |
+| **Total** | **54** | **45** | **9** |
 
-(`presentation.cs` gained 1 pass this change —
-`cs_05_04_01_02_invalidScopeEscalationRequest`; `issuance.cs` is unchanged
-by this change, since the scope check landed only in `presentation_query`,
-which the Storage/Offer APIs never call. Re-derived directly from the
-TCK's own stack traces, which name the failing test's class and package
-unambiguously.)
+(`issuance.cs` gained 2 passes this change —
+`cs_06_05_01_credentialMessage_iatInFuture` and
+`cs_06_06_01_credentialOfferMessage_iatInFuture`; `presentation.cs` is
+unchanged, since the TCK only probes `iat` on the Storage/Offer APIs, both
+`issuance.cs`. Re-derived directly from the TCK's own stack traces, which
+name the failing test's class and package unambiguously.)
 
-`tests/dcp_tck.rs`'s `EXPECTED_FAILURES` asserts the **exact** set of 11
+`tests/dcp_tck.rs`'s `EXPECTED_FAILURES` asserts the **exact** set of 9
 failing test method names (not just the count) — a regression on any of the
-43 currently-passing tests, or any new/different failure, fails that test;
-so does the TCK reporting fewer than 11 failures without a matching update
-here (a sign the claims above have gone stale). The 11 fall into four
+45 currently-passing tests, or any new/different failure, fails that test;
+so does the TCK reporting fewer than 9 failures without a matching update
+here (a sign the claims above have gone stale). The 9 fall into three
 categories, matching "What's simplified or stubbed" above (see
 `EXPECTED_FAILURES`'s own comments for the full per-category test list and
-the reasoning, drawn from reading the real TCK's own source, for why this
-snapshot regroups category 1 more narrowly than the previous one did):
+the reasoning, drawn from reading the real TCK's own source):
 
-1. **No nested-access-token authentication (2 of 11)** —
+1. **No nested-access-token authentication (2 of 9)** —
    `cs_04_03_03_idTokenInvalidIssuerSub`, `cs_05_04_invalidTokenNotAuthorized`:
    the nested `token` claim (the actual Verifiable-Presentation access
-   token) has its `scope` claim read and enforced as of today's third
-   change (closing the third member of this category,
-   `cs_05_04_01_02_invalidScopeEscalationRequest` — see below), but its
-   signature is still never verified, and nothing binds it back to the
-   outer envelope's caller. One gap, two remaining severities; confirmed by
-   reading `PresentationFlowSection4Test`/`PresentationFlowSection5Test` in
-   `eclipse-dataspacetck/dcp-tck` to understand exactly what each still
-   needs: `idTokenInvalidIssuerSub` a nested-token iss/sub binding check
-   (its outer envelope is perfectly valid; the *nested* token was minted
-   for a different party), `invalidTokenNotAuthorized` actual signature
-   verification (its nested token, `"faketoken"`, isn't a JWS at all -
-   this bootstrap's new scope check simply can't decode it and falls back
-   to no restriction, rather than rejecting the request).
-2. **`iat` in the future is not checked (2 of 11)** —
-   `cs_06_05_01_credentialMessage_iatInFuture`,
-   `cs_06_06_01_credentialOfferMessage_iatInFuture`: a real, distinct gap
-   from the four checks the second change added (`iss == sub`, `nbf`,
-   `capabilityInvocation`, `jti` replay specifically — `iat` was never one
-   of them). Only visible on the Storage/Offer APIs; the TCK doesn't probe
-   `iat` on the Presentation API.
-3. **No "trusted issuer" allow-list check (1 of 11)** —
+   token) has its `scope` claim read and enforced (closing
+   `cs_05_04_01_02_invalidScopeEscalationRequest` in an earlier change
+   today), but its signature is still never verified, and nothing binds it
+   back to the outer envelope's caller. One gap, two remaining severities;
+   confirmed by reading `PresentationFlowSection4Test`/
+   `PresentationFlowSection5Test` in `eclipse-dataspacetck/dcp-tck` to
+   understand exactly what each still needs: `idTokenInvalidIssuerSub` a
+   nested-token iss/sub binding check (its outer envelope is perfectly
+   valid; the *nested* token was minted for a different party),
+   `invalidTokenNotAuthorized` actual signature verification (its nested
+   token, `"faketoken"`, isn't a JWS at all - this bootstrap's scope check
+   simply can't decode it and falls back to no restriction, rather than
+   rejecting the request).
+2. **No "trusted issuer" allow-list check (1 of 9)** —
    `cs_06_05_01_credentialMessage_untrustedIssuer`: `verify_bearer_token`
    accepts any `iss` whose `did:web` resolves, whose signature verifies,
    and whose key is capability-listed — but that document itself is never
    checked against a known/trusted-issuer list, a distinct step from
-   signature verification. Unchanged by today's second and third changes.
-4. **Message-content/business-logic validation, unrelated to the token
-   wrapper (6 of 11)** — a schema/enum-invalid `CredentialMessage` body, an
+   signature verification. Unchanged by today's changes.
+3. **Message-content/business-logic validation, unrelated to the token
+   wrapper (6 of 9)** — a schema/enum-invalid `CredentialMessage` body, an
    invalid `status` value, an unverifiable embedded credential proof, an
    unknown `holderPid`, an empty `CredentialOfferMessage.credentials`
    array, and offered credential ids that don't match a known catalog. All
-   six present a genuinely valid Self-Issued ID Token; this bootstrap
-   simply doesn't validate the message body itself yet. Untouched by
-   today's third change (it only ever added a *Presentation*-API check).
+   six present a genuinely valid Self-Issued ID Token (now checked against
+   `iss == sub`/`aud`/`exp`/`nbf`/`iat`/`capabilityInvocation`/
+   `jti`-replay); this bootstrap simply doesn't validate the message body
+   itself yet.
 
-**What changed from the previous (12-failure) snapshot:** exactly one test
-moved from failing to passing -
-`cs_05_04_01_02_invalidScopeEscalationRequest`. Nothing regressed: every
-test that passed before still passes (confirmed by the same exact-set
-assertion, not just a count). The other two members of the previous
-snapshot's combined "nested-access-token validation" category
-(`cs_04_03_03_idTokenInvalidIssuerSub`, `cs_05_04_invalidTokenNotAuthorized`)
-remain exactly as before, honestly regrouped into their own, narrower
-category above (both genuinely need nested-token *authentication*, which
-today's change deliberately does not add — see category 1's own entry).
+**What changed from the previous (11-failure) snapshot:** exactly two
+tests moved from failing to passing -
+`cs_06_05_01_credentialMessage_iatInFuture` and
+`cs_06_06_01_credentialOfferMessage_iatInFuture`, both closed by adding an
+`iat`-in-the-future check to `verify_bearer_token` (see "What's simplified
+or stubbed"). Nothing regressed: every test that passed before still
+passes (confirmed by the same exact-set assertion, not just a count). The
+previous snapshot's "`iat` in the future is not checked" category is gone
+entirely; the remaining four categories from earlier snapshots collapse to
+three now that it's closed.
 
-What's genuinely proven working by the **43 passing tests**: everything the
-previous 42-passing snapshot proved (real `did:web` hosting and
+What's genuinely proven working by the **45 passing tests**: everything the
+previous 43-passing snapshot proved (real `did:web` hosting and
 Credential-Service-endpoint discovery, the Storage/Offer APIs'
-authorization rejections for every *shape*-level token defect, and all
-four endpoints' `iss == sub`/`nbf`/`capabilityInvocation`/`jti`-replay
-checks) plus, new in this snapshot, the Presentation API genuinely
-filtering its response to the intersection of what was requested and what
-the caller's own nested access token actually grants - real, TDD'd, and
-TCK-confirmed, not assumed (see `tests/presentation_scope_enforcement.rs`
-for the same assertion made directly against the HTTP layer, without a
-TCK/Docker dependency, alongside regression guards that a broad grant
-still returns everything requested and that a caller with no nested token
-at all keeps its pre-existing, unrestricted behavior).
+authorization rejections for every *shape*-level token defect, all four
+endpoints' `iss == sub`/`nbf`/`capabilityInvocation`/`jti`-replay checks,
+and the Presentation API's scope-escalation filtering) plus, new in this
+snapshot, all four endpoints genuinely rejecting a Self-Issued ID Token
+whose `iat` claims to have been issued in the future - real, TDD'd, and
+TCK-confirmed, not assumed (see `tests/si_token_validation.rs` for the same
+assertion made directly against the HTTP layer, without a TCK/Docker
+dependency, alongside a regression guard that an `iat` within the existing
+clock-skew leeway is still accepted).
 
 Run it yourself: `cargo test -p identity-hub-http --test dcp_tck --
 --ignored --nocapture` (needs Docker). See `tests/dcp_tck.rs`'s module doc
@@ -675,9 +680,9 @@ configuration works around. For the HTTP-layer-only, no-Docker-needed
 coverage of the authorization behavior, see
 `cargo test -p identity-hub-http --test storage_offer_auth` (per-request
 authorization itself), `cargo test -p identity-hub-http --test
-si_token_validation` (the four outer-envelope token-content checks), and
-`cargo test -p identity-hub-http --test presentation_scope_enforcement`
-(the scope-escalation check added in this snapshot).
+si_token_validation` (the outer-envelope token-content checks, including
+`iat`), and `cargo test -p identity-hub-http --test
+presentation_scope_enforcement` (the scope-escalation check).
 
 ## Continuous integration
 

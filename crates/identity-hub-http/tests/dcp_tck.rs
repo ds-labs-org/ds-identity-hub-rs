@@ -109,6 +109,17 @@ const TCK_CALLBACK_PORT: u16 = 19183;
 /// `../../ARCHITECTURE.md`'s "DCP TCK conformance snapshot" for the full,
 /// categorized narrative this list summarizes.
 ///
+/// **2026-09-20 update (fourth change today):** `verify_bearer_token`
+/// (`../src/auth.rs`) now also rejects a token whose `iat` (issued-at) claim
+/// is in the future, using the same `NBF_LEEWAY_SECS` clock-skew leeway the
+/// existing `nbf` check already used. TDD'd in `tests/si_token_validation.rs`
+/// (`storage_write_rejects_token_with_iat_in_the_future` red-then-green,
+/// plus a `storage_write_accepts_a_token_with_iat_within_clock_skew_leeway`
+/// regression guard). This closes exactly the two `iat`-in-the-future TCK
+/// failures (11 -> 9), confirmed against the real TCK, reproduced with an
+/// identical 9-failure set, zero regressions on the other 45 tests
+/// (43 previously-passing plus these 2 newly-passing).
+///
 /// **2026-09-20 update (third change today):** `presentation_query`
 /// (`../src/handlers.rs`) now enforces scope escalation: it decodes the
 /// caller's nested `token` claim (still unverified as a signature - see
@@ -169,31 +180,23 @@ const EXPECTED_FAILURES: &[&str] = &[
     // default), rather than the outright rejection this test expects.
     "cs_04_03_03_idTokenInvalidIssuerSub",
     "cs_05_04_invalidTokenNotAuthorized",
-    // 2. `iat` (issued-at) in the future is not checked - the four checks
-    // this change added were iss==sub, nbf, capabilityInvocation, and jti
-    // replay specifically (per this task's own scope); `iat` was never one
-    // of them, and remains a real, distinct, not-yet-implemented gap on the
-    // Storage/Offer APIs (the TCK does not probe `iat` on the Presentation
-    // API, so this only appears here).
-    "cs_06_05_01_credentialMessage_iatInFuture",
-    "cs_06_06_01_credentialOfferMessage_iatInFuture",
-    // 3. No "trusted issuer" allow-list check - unchanged from the previous
+    // 2. No "trusted issuer" allow-list check - unchanged from the previous
     // snapshot. `verify_bearer_token` accepts any `iss` whose `did:web`
     // resolves and whose key verifies the signature (and, as of today, is
     // listed under that same document's own `capabilityInvocation` - but
     // that document itself is never checked against a known/trusted-issuer
     // list, a distinct step from signature verification).
     "cs_06_05_01_credentialMessage_untrustedIssuer",
-    // 4. Message-content/business-logic validation this bootstrap does not
+    // 3. Message-content/business-logic validation this bootstrap does not
     // implement, unrelated to the wrapping Self-Issued ID Token (a
-    // genuinely valid token, now checked against all four new criteria
-    // too, is presented in every one of these cases) - unchanged from the
-    // previous snapshot: no schema/enum validation of the
-    // `CredentialMessage`/`CredentialOfferMessage` body itself, no check
-    // that `holderPid` matches a request this process actually issued, no
-    // verification of a stored credential's own embedded proof, and no
-    // validation of a `CredentialOfferMessage`'s credential ids against a
-    // known catalog.
+    // genuinely valid token, now checked against `iss == sub`/`aud`/`exp`/
+    // `nbf`/`iat`/`capabilityInvocation`/`jti`-replay too, is presented in
+    // every one of these cases) - unchanged from the previous snapshot: no
+    // schema/enum validation of the `CredentialMessage`/
+    // `CredentialOfferMessage` body itself, no check that `holderPid`
+    // matches a request this process actually issued, no verification of a
+    // stored credential's own embedded proof, and no validation of a
+    // `CredentialOfferMessage`'s credential ids against a known catalog.
     "cs_06_05_01_credentialMessage_invalidBody",
     "cs_06_05_01_credentialMessage_invalidStatus",
     "cs_06_05_02_credentialMessage_unverifiableProof",
