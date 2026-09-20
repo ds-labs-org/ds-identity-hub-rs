@@ -18,22 +18,20 @@
 //! It does not run the `....issuance.issuer` package against this crate's
 //! separate Issuer Service mode - out of scope for this bootstrap.
 //!
-//! Rather than asserting "no failures" (false at this bootstrap stage - see
-//! `../../ARCHITECTURE.md`, "DCP TCK conformance snapshot" for the honest
-//! numbers and why) or skipping the exercise, this test asserts the
-//! **exact** set of TCK test method names ([`EXPECTED_FAILURES`]) already
-//! known to fail, for the documented reasons in `../../ARCHITECTURE.md`.
-//! That means:
-//!
-//! - a regression on any test *not* in [`EXPECTED_FAILURES`] fails this
-//!   test;
-//! - the TCK reporting *fewer* failures than [`EXPECTED_FAILURES`] also
-//!   fails this test - a sign the list (and `../../ARCHITECTURE.md`'s scope
-//!   claims) have gone stale, not a reason to celebrate a silent
-//!   improvement;
-//! - an entirely new/different failure fails this test the same way a
-//!   missing expected failure does - the assertion is an exact-set
-//!   comparison, not a subset check.
+//! As of 2026-09-20 this asserts genuine full conformance: **zero** real
+//! failures across every test in that scope (54/54 - see
+//! `../../ARCHITECTURE.md`, "DCP TCK conformance snapshot" for the full,
+//! dated history of how this bootstrap got there). Before that, while real
+//! gaps remained, this test asserted the **exact set** of TCK test method
+//! names already known to fail (an `EXPECTED_FAILURES` constant), rather
+//! than skipping the exercise or asserting "no failures" while that was
+//! still false - a regression on any *other* test, or a silent improvement
+//! nobody updated the docs for, would both be caught rather than either
+//! quietly accepted or quietly missed. That constant is retired now that
+//! the set it tracked has reached empty (see this test's own doc comment);
+//! if a real regression ever reappears, the pattern of naming and
+//! documenting it explicitly - rather than silently loosening this
+//! assertion - is the one to return to.
 //!
 //! Test method names (not the TCK's own numbered `@DisplayName`, which
 //! several unrelated tests share verbatim, e.g. two different test classes
@@ -238,45 +236,51 @@ const TCK_HOLDER_PID: &str = "bootstrap-correlation-id";
 /// moved 10 more tests from failing to passing (22 -> 12): the presentation
 /// API's `idTokenInvalidSub`/`idtokenNbfInFuture`/`idTokenKidNoCapabilityInvocation`/
 /// `idtokenJtiUsedTwice`, plus the Storage/Offer APIs' `issNotEqualToSub`/
-/// `nbfViolated`/`jtiAlreadyUsed` (both endpoints). The 11 that remain fall
-/// into four categories:
-const EXPECTED_FAILURES: &[&str] = &[
-    // The nested `token` claim (the actual Verifiable-Presentation access
-    // token a caller forwards inside its Self-Issued ID Token) is never
-    // itself *authenticated* - `verify_bearer_token` checks the *outer*
-    // envelope (now including iss==sub/nbf/capabilityInvocation/jti) and
-    // does read the nested token's own `scope` claim to enforce it (closing
-    // `invalidScopeEscalationRequest`, no longer listed here) - but its
-    // *signature* is still never verified, and nothing binds it back to the
-    // outer envelope's own caller. Both failures below are that one
-    // remaining gap, confirmed by reading the real TCK's own source
-    // (`PresentationFlowSection4Test`/`PresentationFlowSection5Test` in
-    // `eclipse-dataspacetck/dcp-tck`), not guessed from test names alone:
-    // `idTokenInvalidIssuerSub`'s outer envelope is a perfectly valid,
-    // correctly self-issued token (iss==sub==thirdPartyDid, real signature,
-    // real capabilityInvocation) that forwards a nested access token
-    // originally minted for a *different* party (the verifier) - a
-    // confused-deputy case only a nested-token iss/sub binding check would
-    // catch (this bootstrap's scope check reads the `scope` claim but never
-    // checks who signed it or for whom, so a forwarded token with someone
-    // else's genuinely-granted scope still passes); `invalidTokenNotAuthorized`
-    // forwards a nested token that isn't even a real JWS ("faketoken")
-    // inside an otherwise-valid outer envelope - this bootstrap's
-    // `granted_credential_types` (`../src/handlers.rs`) fails to decode it
-    // and falls back to *no* restriction being applied (the pre-existing,
-    // unauthenticated-scope default), rather than the outright rejection
-    // this test expects. A real fix here is nested-token signature
-    // verification plus an iss/sub binding check back to the outer
-    // envelope's caller - out of this bootstrap's scope so far; see
-    // `../../ARCHITECTURE.md`'s "What's simplified or stubbed" ("No
-    // nested-access-token authentication").
-    "cs_04_03_03_idTokenInvalidIssuerSub",
-    "cs_05_04_invalidTokenNotAuthorized",
-];
-
+/// `nbfViolated`/`jtiAlreadyUsed` (both endpoints).
+///
+/// **2026-09-20, final update today: full conformance (54/54).** The last
+/// remaining gap - the nested `token` claim (the actual
+/// Verifiable-Presentation access token a caller forwards inside its
+/// Self-Issued ID Token) was read for its own `scope` claim but never
+/// itself *authenticated* - is now closed by
+/// `auth::verify_nested_access_token` (`../src/auth.rs`), called from
+/// `handlers::granted_credential_types`: the nested token's signature is
+/// genuinely verified against its own resolved `did:web` issuer, its
+/// expiry is checked, and - the actual confused-deputy fix - its own `aud`
+/// claim is checked against the outer envelope's own caller, rejecting the
+/// whole request outright on any failure rather than falling back to
+/// unrestricted access. Confirmed by decompiling the real TCK's own
+/// `PresentationFlowSection4Test`/`PresentationFlowSection5Test`, not
+/// guessed from test names: this closed both
+/// `cs_04_03_03_idTokenInvalidIssuerSub` (a nested token minted for/bound
+/// to a *different* party than whoever presents it - a confused-deputy
+/// forward, since a scope-only check can't catch a forwarded token whose
+/// scope claim is itself genuine) and `cs_05_04_invalidTokenNotAuthorized`
+/// (a nested token that isn't even a real JWS - `"faketoken"` - which used
+/// to make the pre-existing scope check silently degrade to no restriction
+/// rather than reject). TDD'd in
+/// `tests/nested_access_token_authentication.rs`. See
+/// `../../ARCHITECTURE.md`'s "DCP TCK conformance snapshot" for the full,
+/// final accounting.
+///
+/// With this, there are no more documented gaps in the Credential Service
+/// scope this test covers: every real DCP TCK test in
+/// `presentation.cs`/`issuance.cs` passes. This test used to assert an
+/// **exact set** of known-failing test method names (an `EXPECTED_FAILURES`
+/// constant) rather than "no failures", precisely so a regression on any
+/// *other* test, or a silent improvement nobody updated the docs for, would
+/// both be caught rather than either quietly accepted or quietly missed.
+/// Now that the set has reached empty, that machinery is retired in favor
+/// of the plain assertion below - `EXPECTED_FAILURES` would otherwise be an
+/// unused, always-empty constant carried forward for no reason. If a real
+/// regression ever reappears, the fix is to actually fix it (or, if a
+/// specific gap is knowingly reintroduced and accepted, to bring back a
+/// named, documented `EXPECTED_FAILURES`-style list here and in
+/// `../../ARCHITECTURE.md` together - never to silently loosen this
+/// assertion.
 #[tokio::test]
 #[ignore = "needs Docker; run explicitly with `cargo test --test dcp_tck -- --ignored --nocapture`"]
-async fn dcp_tck_matches_documented_credential_service_scope() {
+async fn dcp_tck_reports_full_credential_service_conformance() {
     let _ = tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
@@ -322,16 +326,17 @@ async fn dcp_tck_matches_documented_credential_service_scope() {
         .expect("failed to start the dcp-tck-runtime container");
 
     let actual: BTreeSet<String> = reporter.failing_test_methods();
-    let expected: BTreeSet<String> = EXPECTED_FAILURES.iter().map(|s| s.to_string()).collect();
 
-    assert_eq!(
-        actual, expected,
-        "TCK failure set no longer matches EXPECTED_FAILURES. Either a real \
-         regression, or this bootstrap now covers more than EXPECTED_FAILURES \
-         documents (some entries no longer fail). Update EXPECTED_FAILURES and \
-         ../../ARCHITECTURE.md together with whichever is true - never just to \
-         make this test pass again. Actual failures reported by the TCK this \
-         run: {actual:?}"
+    assert!(
+        actual.is_empty(),
+        "TCK reported real test failures on the Credential Service scope this \
+         bootstrap previously reached full conformance (54/54) on. This is a \
+         real regression - fix it, or, if a specific gap is knowingly being \
+         reintroduced and accepted, document it explicitly here and in \
+         ../../ARCHITECTURE.md together (a named, documented expected-failures \
+         list, not a silently loosened assertion). Never delete/relax this \
+         assertion just to make the test pass again. Actual failures reported \
+         by the TCK this run: {actual:?}"
     );
 }
 

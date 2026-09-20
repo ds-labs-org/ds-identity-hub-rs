@@ -37,7 +37,6 @@
 //! requests both types back gets both, including one it was never
 //! authorized to read.
 
-use std::net::SocketAddr;
 use std::sync::Arc;
 
 use identity_hub_core::identity::ServiceIdentity;
@@ -50,20 +49,26 @@ use tokio::net::TcpListener;
 
 /// Boots this crate's real Credential Service (the system under test) on an
 /// ephemeral loopback port - the same shape `si_token_validation.rs` and
-/// `storage_offer_auth.rs` already establish.
+/// `storage_offer_auth.rs` already establish. The listener is bound
+/// *before* `Config::for_test` so the real ephemeral port can be threaded
+/// into it as `bind_addr` (`AppState::new` derives `state.sts_party`'s own
+/// `did:web` host from `bind_addr`'s port) - required since
+/// `nested_access_token_authentication.rs`'s fix made `state.sts_party`'s
+/// DID genuinely resolved over real HTTP (to verify a nested access
+/// token's signature), not just compared as an opaque string.
 async fn spawn_credential_service() -> (Arc<AppState>, String) {
-    let config = Config::for_test(
-        Mode::CredentialService,
-        SocketAddr::from(([127, 0, 0, 1], 0)),
-        "localhost:0",
-    );
-    let (state, router) = identity_hub_http::build(config);
     let listener = TcpListener::bind("127.0.0.1:0")
         .await
         .expect("bind an ephemeral loopback port for the credential service under test");
     let addr = listener
         .local_addr()
         .expect("bound listener has a local address");
+    let config = Config::for_test(
+        Mode::CredentialService,
+        addr,
+        format!("127.0.0.1:{}", addr.port()),
+    );
+    let (state, router) = identity_hub_http::build(config);
     tokio::spawn(async move {
         axum::serve(listener, router)
             .await
@@ -147,15 +152,22 @@ fn seed_both_credential_types(state: &AppState) {
 /// signed by the STS-party identity, `scope` set to whatever was granted
 /// (space-delimited when more than one, per `SecureTokenServerImpl`'s own
 /// `String.join(" ", scopes)` in the real TCK - RFC 6749 ยง3.3's own
-/// scope-string convention).
-fn mint_granted_access_token(state: &AppState, granted_scope: &str) -> String {
+/// scope-string convention), and `aud` bound to `bound_to_did` - the party
+/// this grant is actually for (matches the real TCK's own
+/// `SecureTokenServerImpl.obtainReadToken`, which always requests the
+/// nested token's `aud` set to whichever party will present it - see
+/// `nested_access_token_authentication.rs`'s module doc for the full
+/// decompiled trace). Since `presentation_query_rejects_a_nested_token_forwarded_to_a_different_party`
+/// (that module) now enforces this binding, every caller here must pass its
+/// own DID.
+fn mint_granted_access_token(state: &AppState, bound_to_did: &str, granted_scope: &str) -> String {
     let now = dcp_core::now_secs();
     sign(
         &state.sts_party,
         json!({
             "iss": state.sts_party.own_did(),
             "sub": state.sts_party.own_did(),
-            "aud": state.identity.own_did(),
+            "aud": bound_to_did,
             "scope": granted_scope,
             "iat": now,
             "exp": now + 300,
@@ -244,7 +256,7 @@ async fn presentation_query_filters_response_to_the_tokens_own_granted_scope() {
     seed_both_credential_types(&state);
     let caller = spawn_caller_identity("holder").await;
 
-    let nested = mint_granted_access_token(&state, MEMBERSHIP_SCOPE);
+    let nested = mint_granted_access_token(&state, caller.own_did(), MEMBERSHIP_SCOPE);
     let outer = mint_outer_envelope(&caller, state.identity.own_did(), Some(&nested));
 
     let response = query(&base, &outer, &[MEMBERSHIP_SCOPE, SENSITIVE_SCOPE]).await;
@@ -278,8 +290,11 @@ async fn presentation_query_returns_everything_within_a_broad_grant() {
     // Granted scope covers both types (space-delimited, matching the real
     // TCK's own SecureTokenServerImpl.obtainReadToken /
     // `String.join(" ", scopes)` when more than one scope is granted).
-    let nested =
-        mint_granted_access_token(&state, &format!("{MEMBERSHIP_SCOPE} {SENSITIVE_SCOPE}"));
+    let nested = mint_granted_access_token(
+        &state,
+        caller.own_did(),
+        &format!("{MEMBERSHIP_SCOPE} {SENSITIVE_SCOPE}"),
+    );
     let outer = mint_outer_envelope(&caller, state.identity.own_did(), Some(&nested));
 
     let response = query(&base, &outer, &[MEMBERSHIP_SCOPE, SENSITIVE_SCOPE]).await;

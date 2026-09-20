@@ -1,9 +1,11 @@
 # Architecture
 
-**Status:** Bootstrap, working end to end against the real TCK (see "DCP TCK
-conformance snapshot" below). Not yet integrated with a live dataspace
-control plane, a real key-management/HSM backend, or a persistent store.
-**Date:** 2026-09-20 (seven changes today: real per-request authorization
+**Status:** Bootstrap, working end to end against the real TCK, now at full
+measured conformance on the Credential Service scope this project targets
+(see "DCP TCK conformance snapshot" below). Not yet integrated with a live
+dataspace control plane, a real key-management/HSM backend, or a persistent
+store.
+**Date:** 2026-09-20 (eight changes today: real per-request authorization
 added to the Storage API and Credential Offer API; then `verify_bearer_token`
 gained `iss == sub`, `nbf`, `capabilityInvocation`, and `jti`-replay checks;
 then the Presentation API gained scope-escalation enforcement against the
@@ -18,9 +20,13 @@ Offer API gained real message-content/business-logic validation (required
 `CredentialMessage` fields, a `status` allow-list, a known-`holderPid`
 allow-list, genuine embedded-credential proof verification, and offer
 `credentials`-array/catalog checks — see `identity_hub_http::validation`);
-see "What's simplified or stubbed" and "DCP TCK conformance snapshot" below
-— 36 -> 22 -> 12 -> 11 -> 9 -> 8 -> 2 real TCK failures, each step TDD'd and
-re-measured, not assumed)
+then, finally, the Presentation API's nested `token` claim (the actual
+Verifiable-Presentation access token a caller forwards) gained genuine
+authentication — signature verification against its own resolved `did:web`
+issuer plus a binding check back to the outer envelope's own caller — closing
+the last two documented gaps; see "What's simplified or stubbed" and "DCP TCK
+conformance snapshot" below — 36 -> 22 -> 12 -> 11 -> 9 -> 8 -> 2 -> **0** real
+TCK failures, each step TDD'd and re-measured, not assumed)
 
 This file records the scope and design decisions behind this project's
 bootstrap, why each was made, and an honest accounting of what actually
@@ -322,12 +328,14 @@ see "DCP TCK conformance snapshot" below, which is unchanged by this work
   for a malformed one, extracts the requested credential type(s) from
   `scope` via the DCP `org.eclipse.dspace.dcp.vc.type` scope alias (the
   same default regex the real TCK itself uses), **narrows that down to
-  what the caller's own nested access token actually grants** (added
-  2026-09-20 — see "What's simplified or stubbed" for exactly what that
-  check does and doesn't cover), looks up matching stored
-  credentials, and returns a real, correctly-audienced, ES256-signed
-  Verifiable Presentation wrapping them. Verified genuinely working against
-  the real TCK — see "DCP TCK conformance snapshot".
+  what the caller's own nested access token actually grants, with the
+  nested token itself now genuinely authenticated** (scope-narrowing added
+  2026-09-20; signature verification and confused-deputy binding added
+  later the same day — see "What's simplified or stubbed" for the full
+  history of both changes), looks up matching stored credentials, and
+  returns a real, correctly-audienced, ES256-signed Verifiable Presentation
+  wrapping them. Verified genuinely working against the real TCK — see
+  "DCP TCK conformance snapshot".
 - **The Credential Offer API** (`POST /offers` on a Credential Service) —
   accepts a `CredentialOfferMessage` and records it as a real, queryable
   RDF record (`identity_hub_graph::CredentialGraph::add_offer`, as of
@@ -447,11 +455,13 @@ including the first (wrong) fixes tried along the way).
   `ScopeMatcher::credential_types` — the exact same matcher the requested
   `scope` already goes through) and intersects the two before looking
   anything up: a caller may request more than it was granted, but only
-  ever receives what it was actually granted. A missing or unparseable
-  nested token falls back to this bootstrap's pre-existing, unrestricted
-  behavior (see "No nested-access-token *authentication*" below for why
-  that's a deliberate, documented default and not a fix for the other two
-  remaining nested-token gaps). TDD'd:
+  ever receives what it was actually granted. At the time of this change, a
+  missing *or unparseable* nested token both fell back to this bootstrap's
+  pre-existing, unrestricted behavior — the unparseable case was a real,
+  separate gap this change didn't fix (see "Nested-access-token
+  authentication (confused-deputy fix)" below, which closed it later the
+  same day: only a genuinely *absent* nested token keeps that permissive
+  default now). TDD'd:
   `tests/presentation_scope_enforcement.rs` asserts the escalation case
   red-then-green (a token granted only `MembershipCredential` requesting
   both `MembershipCredential` and `SensitiveDataCredential` back must
@@ -463,33 +473,56 @@ including the first (wrong) fixes tried along the way).
   `cs_05_04_01_02_invalidScopeEscalationRequest`, the last test that gap's
   own name suggested but that the other two checks below don't touch (12
   -> 11) — see "DCP TCK conformance snapshot".
-- **No nested-access-token *authentication*.** `verify_bearer_token` only
-  validates the *outer* Self-Issued ID Token envelope (now including all
-  four checks above); the nested `token` claim it carries is, as of today's
-  third change, read for its own `scope` claim (see the bullet above) but
-  its **signature is still never verified**, and nothing binds it back to
+- **Nested-access-token authentication (confused-deputy fix), added
+  2026-09-20 (eighth and final change today).** `verify_bearer_token` only
+  ever validated the *outer* Self-Issued ID Token envelope; the nested
+  `token` claim it carries (the actual Verifiable-Presentation access
+  token, per `base.protocol.md`) had, since the third change today, its own
+  `scope` claim read and enforced (see the scope-escalation bullet above)
+  but its **signature was never verified**, and nothing bound it back to
   the outer envelope's own caller. Reading the real TCK's own source
   (`PresentationFlowSection4Test`/`PresentationFlowSection5Test` in
-  `eclipse-dataspacetck/dcp-tck`) while investigating why three tests still
-  failed after the second change above clarified that this was **one**
-  gap with three severities, not the two differently-described categories
-  an earlier snapshot listed separately ("Self-Issued ID Token validation
-  gaps" and "scope-based authorization isn't enforced") — today's third
-  change closes the least severe of the three (the scope one) but leaves
-  the other two, which need actual authentication of the nested token, not
-  just reading a claim out of it: a nested token can be missing entirely
-  valid signing (`cs_05_04_invalidTokenNotAuthorized`'s literal
-  `"faketoken"` — `granted_credential_types` fails to decode it and falls
-  back to no restriction, the pre-existing default, rather than rejecting
-  the request), or minted for a different party than the one presenting it
-  (`cs_04_03_03_idTokenInvalidIssuerSub`'s outer envelope is a perfectly
-  valid, correctly self-issued token from a third party that forwards an
-  access token originally minted for the actual verifier — a
-  confused-deputy case a scope check alone can't catch, since the forwarded
-  token's `scope` claim is itself genuine). A real fix here is nested-token
-  signature verification plus an iss/sub binding check back to the outer
-  envelope's caller — a larger, separate piece of work than the scope
-  check above, out of this bootstrap's scope for today.
+  `eclipse-dataspacetck/dcp-tck`) confirmed this was **one** gap with two
+  remaining severities, both now closed by a new
+  `auth::verify_nested_access_token` (`identity-hub-http/src/auth.rs`),
+  called from `handlers::granted_credential_types`: it resolves the nested
+  token's own `iss` DID document, verifies its JWS signature against the
+  key named by its `kid` (the exact same `resolve_did`/`find_verifying_key`/
+  `verify_jws_signature` primitives `verify_bearer_token` already uses for
+  the outer envelope), checks it has not expired, and — the confused-deputy
+  fix itself — checks its `aud` claim equals the outer envelope's own
+  `iss`/`sub` (confirmed by decompiling `SecureTokenServerImpl.obtainReadToken`/
+  `requestRemoteAccessToken`: the real TCK always mints a nested access
+  token bound, via `aud`, to whichever party will actually present it).
+  Any failure — undecodable, unverifiable, expired, or wrongly bound — now
+  rejects the whole request outright (`401`), replacing the old
+  best-effort scope read that silently fell back to unrestricted access on
+  a decode failure. This closed both `cs_05_04_invalidTokenNotAuthorized`
+  (a nested token that isn't even a real JWS — the literal `"faketoken"` —
+  inside an otherwise-valid outer envelope) and
+  `cs_04_03_03_idTokenInvalidIssuerSub` (a nested token genuinely valid and
+  correctly signed, but minted for/bound to the *verifier*, forwarded by a
+  different party — `thirdPartyDid` — presenting a perfectly valid outer
+  envelope of its own; a scope-only check can't catch this, since the
+  forwarded token's `scope` claim is itself completely genuine). TDD'd:
+  `tests/nested_access_token_authentication.rs` asserts both cases
+  red-then-green, plus regression guards that a nested token correctly
+  bound to its own presenter still succeeds, an expired-but-otherwise-valid
+  nested token is also rejected, and a bare outer envelope with no nested
+  token at all keeps this bootstrap's pre-existing, deliberately permissive
+  default. Fixing this also surfaced (and fixed) a latent gap in this
+  crate's own *test* fixtures, not production code: `presentation_scope_enforcement.rs`'s
+  nested-token helper had been minting tokens bound (`aud`) to the
+  Credential Service's own DID rather than to the caller presenting them —
+  harmless before this change (nothing checked `aud` on the nested token at
+  all) but a false regression the moment the binding check went in; fixed
+  by binding it to the caller's own DID, matching what the real TCK
+  actually does. Real, measured effect on TCK conformance: closed exactly
+  `cs_04_03_03_idTokenInvalidIssuerSub` and
+  `cs_05_04_invalidTokenNotAuthorized` (2 -> **0**), confirmed against the
+  real TCK, reproduced identically three times (54/54 `SUCCESSFUL` every
+  run), with zero regressions on the other 52 previously-passing tests —
+  see "DCP TCK conformance snapshot".
 - **Trusted-issuer allow-list check, added 2026-09-20 (sixth change
   today).** `verify_bearer_token` accepting any `iss` whose `did:web`
   document resolves and whose key verifies the token's signature (and is
@@ -672,21 +705,26 @@ including the first (wrong) fixes tried along the way).
 ## DCP TCK conformance snapshot
 
 **Run against a real, locally running `eclipsedataspacetck/dcp-tck-runtime:latest`
-container — 2026-09-20**, after seven changes today: adding real
-per-request authorization to the Storage API and Credential Offer API;
-adding the `iss == sub`/`nbf`/`capabilityInvocation`/`jti`-replay checks to
-`verify_bearer_token`; adding scope-escalation enforcement to
-`presentation_query` against the caller's own nested access-token grant;
-adding an `iat`-in-the-future check to `verify_bearer_token`; adding a
-trusted-issuer allow-list check to the Storage API and Credential Offer API;
-then adding real message-content/business-logic validation to both (see
-"What's simplified or stubbed" for all seven). Not fabricated:
-`tests/dcp_tck.rs` boots this crate's real Credential Service in-process
-and drives the actual, official TCK container against it via
-`testcontainers`, exactly as it runs in CI. Reproduced identically twice
-with a 2-failure set immediately after the seventh change (and the prior
-8-failure result was itself reproduced twice before that change, per the
-previous snapshot) before being written down here.
+container — 2026-09-20, final result: full conformance, 54/54.** Eight
+changes today, in order: real per-request authorization added to the
+Storage API and Credential Offer API; `verify_bearer_token` gaining
+`iss == sub`/`nbf`/`capabilityInvocation`/`jti`-replay checks;
+scope-escalation enforcement added to `presentation_query` against the
+caller's own nested access-token grant; the Storage API's credential store
+and Credential Offer API's accepted-offer record rebuilt on a
+Contreforts-backed semantic RDF graph (orthogonal to TCK conformance — see
+"Provenance: Contreforts"); an `iat`-in-the-future check added to
+`verify_bearer_token`; a trusted-issuer allow-list check added to the
+Storage API and Credential Offer API; real message-content/business-logic
+validation added to both; and finally, genuine authentication of the
+nested `token` claim itself (signature verification plus a confused-deputy
+binding check), closing the last two gaps (see "What's simplified or
+stubbed" for the full account of each). Not fabricated: `tests/dcp_tck.rs`
+boots this crate's real Credential Service in-process and drives the
+actual, official TCK container against it via `testcontainers`, exactly as
+it runs in CI. The 0-failure result was reproduced identically **three**
+times in a row (54/54 `SUCCESSFUL`, byte-identical test sets, zero
+failures every run) before being written down here.
 
 Scoped to the Credential Service test packages
 (`org.eclipse.dataspacetck.dcp.verification.presentation.cs` +
@@ -694,69 +732,62 @@ Scoped to the Credential Service test packages
 
 | Test package | Total | Passed | Failed |
 |---|---:|---:|---:|
-| `presentation.cs` (VPP) | 23 | 21 | 2 |
+| `presentation.cs` (VPP) | 23 | 23 | 0 |
 | `issuance.cs` (CIP) | 31 | 31 | 0 |
-| **Total** | **54** | **52** | **2** |
+| **Total** | **54** | **54** | **0** |
 
-(`issuance.cs` gained all 6 of its remaining failures this change — the
-message-content/business-logic checks below; `presentation.cs` is
-unchanged, since none of the six probe the Presentation API. Re-derived
-directly from the TCK's own stack traces, which name the failing test's
-class and package unambiguously.)
+`tests/dcp_tck.rs`'s `dcp_tck_reports_full_credential_service_conformance`
+now asserts the TCK's own reported failure set is genuinely empty — not a
+count check, an assertion against the actual set of failing test method
+names the TCK's own stack traces name, which happens to be empty. Before
+today's eighth change, this test asserted an **exact set** of 2 known
+failing test names (`EXPECTED_FAILURES`, now retired — see that test's own
+doc comment for why keeping an always-empty constant around would serve no
+purpose): `cs_04_03_03_idTokenInvalidIssuerSub` and
+`cs_05_04_invalidTokenNotAuthorized`, both closed by this change.
 
-`tests/dcp_tck.rs`'s `EXPECTED_FAILURES` asserts the **exact** set of 2
-failing test method names (not just the count) — a regression on either of
-the 52 currently-passing tests, or any new/different failure, fails that
-test; so does the TCK reporting fewer than 2 failures without a matching
-update here (a sign the claims above have gone stale). Both remaining
-failures are **one gap with two severities: no nested-access-token
-authentication** — `cs_04_03_03_idTokenInvalidIssuerSub`,
-`cs_05_04_invalidTokenNotAuthorized`: the nested `token` claim (the actual
-Verifiable-Presentation access token) has its `scope` claim read and
-enforced (closing `cs_05_04_01_02_invalidScopeEscalationRequest` in an
-earlier change today), but its signature is still never verified, and
-nothing binds it back to the outer envelope's caller. Confirmed by reading
-`PresentationFlowSection4Test`/`PresentationFlowSection5Test` in
-`eclipse-dataspacetck/dcp-tck` to understand exactly what each still needs:
-`idTokenInvalidIssuerSub` a nested-token iss/sub binding check (its outer
-envelope is perfectly valid; the *nested* token was minted for a different
-party), `invalidTokenNotAuthorized` actual signature verification (its
-nested token, `"faketoken"`, isn't a JWS at all - this bootstrap's scope
-check simply can't decode it and falls back to no restriction, rather than
-rejecting the request). See `EXPECTED_FAILURES`'s own comment for the full
-reasoning.
+**What closed the last two failures — one gap, two severities: nested-access-token
+authentication.** The nested `token` claim (the actual
+Verifiable-Presentation access token a caller forwards inside its outer
+Self-Issued ID Token, per `base.protocol.md`) already had its `scope` claim
+read and enforced (closing `cs_05_04_01_02_invalidScopeEscalationRequest` in
+an earlier change today), but its signature was never verified, and nothing
+bound it back to the outer envelope's own caller. Confirmed by reading
+`PresentationFlowSection4Test`/`PresentationFlowSection5Test` and
+`SecureTokenServerImpl` in `eclipse-dataspacetck/dcp-tck`, not guessed from
+test names: `idTokenInvalidIssuerSub`'s outer envelope is perfectly valid
+(`iss == sub == thirdPartyDid`, genuinely signed, correctly audienced), but
+the nested access token it forwards was minted bound (`aud`) to the
+*verifier*'s DID, not `thirdPartyDid` — a confused-deputy forward a
+scope-only check can't catch, since the forwarded token's `scope` claim is
+itself genuine. `invalidTokenNotAuthorized`'s nested token, the literal
+`"faketoken"`, isn't a JWS at all — this bootstrap's old scope check simply
+couldn't decode it and fell back to *no* restriction, rather than rejecting
+the request. Fixed by a new `auth::verify_nested_access_token`
+(`identity-hub-http/src/auth.rs`): it resolves the nested token's own `iss`
+DID, verifies its JWS signature (the same primitives `verify_bearer_token`
+already uses for the outer envelope), checks it hasn't expired, and checks
+its `aud` claim equals the outer envelope's own caller — any failure now
+rejects the whole request outright. See "What's simplified or stubbed"
+("Nested-access-token authentication (confused-deputy fix)") for the full
+account, including a latent test-fixture gap this surfaced and fixed in
+`presentation_scope_enforcement.rs`.
 
-**What changed from the previous (8-failure) snapshot:** all six remaining
-message-content/business-logic tests moved from failing to passing -
-`cs_06_05_01_credentialMessage_invalidBody`,
-`cs_06_05_01_credentialMessage_invalidStatus`,
-`cs_06_05_02_credentialMessage_unverifiableProof`,
-`cs_06_05_credentialMessage_unknownHolderPid`,
-`cs_06_06_01_credentialOfferMessage_emptyCredentials`, and
-`cs_06_06_01_credentialOfferMessage_sparse_randomIds_expect400` - closed by
-the new `identity_hub_http::validation` module, wired into `storage_write`
-and `credential_offer` (see "What's simplified or stubbed"). Nothing
-regressed: every test that passed before still passes (confirmed by the
-same exact-set assertion, not just a count). The previous snapshot's
-"Message-content/business-logic validation" category is gone entirely; only
-the nested-access-token-authentication gap remains.
-
-What's genuinely proven working by the **52 passing tests**: everything the
-previous 46-passing snapshot proved (real `did:web` hosting and
+What's genuinely proven working by the **54 passing tests**: everything
+every previous snapshot proved (real `did:web` hosting and
 Credential-Service-endpoint discovery, the Storage/Offer APIs'
 authorization rejections for every *shape*-level token defect, all four
 endpoints' `iss == sub`/`nbf`/`iat`/`capabilityInvocation`/`jti`-replay
-checks, the Presentation API's scope-escalation filtering, and the
-trusted-issuer allow-list) plus, new in this snapshot: the Storage API
-genuinely rejecting a `CredentialMessage` missing a required field, an
-unrecognized `status`, an unknown `holderPid`, or an embedded credential
-whose proof doesn't verify; and the Credential Offer API genuinely
-rejecting an empty `credentials` array or a sparse (id-only) offer whose
-ids don't match the offering issuer's own real Issuer Metadata API catalog
-- real, TDD'd, and TCK-confirmed, not assumed (see
-`tests/message_content_validation.rs` for the same assertions made
-directly against the HTTP layer, without a TCK/Docker dependency, alongside
-regression guards for every accept path).
+checks, the trusted-issuer allow-list, and the Storage/Offer APIs' full
+message-content/business-logic validation) plus, new in this snapshot: the
+Presentation API genuinely authenticating a caller's nested access token —
+rejecting a forwarded (confused-deputy) grant and an undecodable one alike
+— rather than trusting or best-effort-reading it. Real, TDD'd, and
+TCK-confirmed, not assumed: see `tests/nested_access_token_authentication.rs`
+for the same two closing assertions made directly against the HTTP layer,
+without a TCK/Docker dependency, alongside regression guards that a
+correctly-bound nested token, an expired one, and a bare envelope with no
+nested token at all all behave exactly as they should.
 
 Run it yourself: `cargo test -p identity-hub-http --test dcp_tck --
 --ignored --nocapture` (needs Docker). See `tests/dcp_tck.rs`'s module doc
@@ -769,8 +800,11 @@ si_token_validation` (the outer-envelope token-content checks, including
 `iat`), `cargo test -p identity-hub-http --test
 presentation_scope_enforcement` (the scope-escalation check), `cargo test
 -p identity-hub-http --test trusted_issuer_allowlist` (the trusted-issuer
-allow-list check), and `cargo test -p identity-hub-http --test
-message_content_validation` (the message-content/business-logic checks).
+allow-list check), `cargo test -p identity-hub-http --test
+message_content_validation` (the message-content/business-logic checks),
+and `cargo test -p identity-hub-http --test
+nested_access_token_authentication` (the nested-token authentication
+check).
 
 ## Continuous integration
 
@@ -780,10 +814,13 @@ message_content_validation` (the message-content/business-logic checks).
   --all-targets -- -D warnings`, `cargo test --workspace` (which does not
   run `dcp_tck.rs`'s `#[ignore]`d test). No Docker needed.
 - **`dcp-tck`** — the DCP TCK conformance test described above, on
-  `ubuntu-latest` (Docker preinstalled). Gating, not `allow-failure`: an
-  exact-match assertion against a documented, categorized failure set lets
-  this catch a real regression the same way an all-green job would, without
-  overclaiming conformance this bootstrap doesn't have.
+  `ubuntu-latest` (Docker preinstalled). Gating, not `allow-failure`: as of
+  2026-09-20 it asserts genuine full conformance (the TCK's own reported
+  failure set is empty) on the Credential Service scope this project
+  targets, so any real regression fails the job the same way it would fail
+  an all-green expectation anywhere else — no categorized-failure-set
+  bookkeeping is needed anymore now that there is nothing left to
+  categorize (see "DCP TCK conformance snapshot").
 
 Unlike `ds-sql-dps-rs`'s pinned `dps-tck-runtime:1.3.0`, this job pins
 `dcp-tck-runtime:latest` — the exact version documented as available in
@@ -867,6 +904,11 @@ ds-identity-hub-rs/
                                   Message-content/business-logic checks on
                                   the Storage/Offer APIs (real HTTP, no
                                   Docker/TCK needed).
+        nested_access_token_authentication.rs
+                                  Nested access-token authentication
+                                  (signature + confused-deputy binding
+                                  check) on the Presentation API (real
+                                  HTTP, no Docker/TCK needed).
   vendor/
     contreforts-core/      Git submodule (contreforts-ai/contreforts-core),
                             pinned to commit 95a4940 - the same commit

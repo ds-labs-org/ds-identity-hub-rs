@@ -7,11 +7,13 @@
 //! `iat` (not in the future), and `jti` replay. Every one of these is now
 //! real. [`check_trusted_issuer`] is a separate, later step (DCP's own
 //! "Verify Trust") that endpoints expecting one specific counterparty (the
-//! Storage/Credential Offer APIs) call afterwards - see its own doc comment
-//! and `../../ARCHITECTURE.md`'s "DCP TCK conformance snapshot" for exactly
-//! which TCK-caught gaps this closed and which (nested-access-token
-//! authentication, message-content validation) remain out of this
-//! bootstrap's scope.
+//! Storage/Credential Offer APIs) call afterwards - see its own doc comment.
+//! [`verify_nested_access_token`] is yet another, separate step - it
+//! authenticates the caller's own nested `token` claim (the actual
+//! Verifiable-Presentation access token forwarded inside the outer
+//! envelope, per `base.protocol.md`), called by the Presentation API - see
+//! its own doc comment and `../../ARCHITECTURE.md`'s "DCP TCK conformance
+//! snapshot" for exactly which TCK-caught gaps each of these closed.
 
 use std::collections::HashSet;
 use std::sync::Mutex;
@@ -54,6 +56,14 @@ pub enum AuthError {
     TokenReplayed,
     #[error("issuer '{0}' is not on this service's trusted-issuer allow-list")]
     UntrustedIssuer(String),
+    #[error("nested access token is not valid: {0}")]
+    InvalidNestedToken(String),
+    #[error("nested access token has expired")]
+    NestedTokenExpired,
+    #[error(
+        "nested access token is not bound to the party presenting it (aud does not match the outer envelope's own caller)"
+    )]
+    NestedTokenNotBoundToCaller,
 }
 
 /// Extracts a Self-Issued ID Token from an `Authorization: Bearer <jwt>`
@@ -169,4 +179,60 @@ pub fn check_trusted_issuer(
     } else {
         Err(AuthError::UntrustedIssuer(iss.to_string()))
     }
+}
+
+/// Authenticates the caller's own nested `token` claim (the DCP
+/// "Verifiable Presentation Access Token", `base.protocol.md`) - distinct
+/// from, and applied after, `verify_bearer_token`'s validation of the
+/// *outer* Self-Issued ID Token envelope that carries it.
+///
+/// Verifies the nested token's own signature against its own resolved
+/// `did:web` issuer (the same `resolve_did`/`find_verifying_key`/
+/// `verify_jws_signature` primitives `verify_bearer_token` already uses for
+/// the outer envelope), checks it has not expired, and - the actual
+/// confused-deputy fix, closing `cs_04_03_03_idTokenInvalidIssuerSub` -
+/// checks the nested token's own `aud` claim equals `outer_sub` (the outer
+/// envelope's own `iss`/`sub`, i.e. whoever is actually presenting this
+/// request): a nested token minted for/bound to a *different* party is a
+/// forwarded token, not a legitimate grant to the party presenting it now.
+///
+/// Returns the nested token's decoded payload (so the caller can read its
+/// own `scope` claim) on success. Callers must treat any `Err` here as an
+/// outright rejection of the whole request rather than a fallback to
+/// unrestricted access - once a nested token is present at all, it must be
+/// genuinely authenticated, not best-effort-decoded (see
+/// `cs_05_04_invalidTokenNotAuthorized`, whose nested token, `"faketoken"`,
+/// isn't even a real JWS).
+pub async fn verify_nested_access_token(
+    http: &reqwest::Client,
+    nested_token: &str,
+    outer_sub: &str,
+    insecure_http: bool,
+) -> Result<Value, AuthError> {
+    let (_, header, payload) = decode_jws_unverified(nested_token)
+        .map_err(|e| AuthError::InvalidNestedToken(e.to_string()))?;
+    let nested_iss = payload.get("iss").and_then(Value::as_str).ok_or_else(|| {
+        AuthError::InvalidNestedToken("nested token has no iss claim".to_string())
+    })?;
+    let kid = header.get("kid").and_then(Value::as_str).ok_or_else(|| {
+        AuthError::InvalidNestedToken("nested token has no kid header".to_string())
+    })?;
+
+    let issuer_doc = resolve_did(http, nested_iss, insecure_http)
+        .await
+        .map_err(AuthError::DidResolution)?;
+    let issuer_key = find_verifying_key(&issuer_doc, kid).map_err(AuthError::InvalidNestedToken)?;
+    verify_jws_signature(nested_token, &issuer_key).map_err(AuthError::InvalidNestedToken)?;
+
+    let exp = payload.get("exp").and_then(Value::as_u64).unwrap_or(0);
+    if exp <= now_secs() {
+        return Err(AuthError::NestedTokenExpired);
+    }
+
+    let nested_aud = payload.get("aud").and_then(Value::as_str).unwrap_or("");
+    if nested_aud != outer_sub {
+        return Err(AuthError::NestedTokenNotBoundToCaller);
+    }
+
+    Ok(payload)
 }

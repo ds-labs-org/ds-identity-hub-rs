@@ -19,7 +19,9 @@ use identity_hub_core::messages::{
 use identity_hub_core::store::StoredCredentialBatch;
 use identity_hub_core::sts::{self, StsTokenRequest};
 
-use crate::auth::{AuthError, check_trusted_issuer, verify_bearer_token};
+use crate::auth::{
+    AuthError, check_trusted_issuer, verify_bearer_token, verify_nested_access_token,
+};
 use crate::config::Mode;
 use crate::state::{AppState, RequestRecord};
 use crate::validation::{
@@ -190,7 +192,16 @@ async fn presentation_query(
     }
 
     let requested_types = state.scope_matcher.credential_types(&message.scope);
-    let allowed_types = granted_credential_types(&state, &claims);
+    let allowed_types = match granted_credential_types(&state, &claims, caller_did).await {
+        Ok(allowed) => allowed,
+        // A nested `token` claim was present but failed authentication
+        // (undecodable, unverifiable, expired, or not bound back to this
+        // caller) - reject the whole request outright, closing
+        // `cs_04_03_03_idTokenInvalidIssuerSub`/`cs_05_04_invalidTokenNotAuthorized`.
+        // See `granted_credential_types`/`auth::verify_nested_access_token`'s
+        // own doc comments.
+        Err(err) => return auth_error_response(err),
+    };
     let effective_types = match allowed_types {
         // Scope-escalation enforcement (`cs_05_04_01_02_invalidScopeEscalationRequest`
         // in the real DCP TCK): a caller may request more than its own
@@ -204,11 +215,9 @@ async fn presentation_query(
             .into_iter()
             .filter(|t| allowed.contains(t))
             .collect(),
-        // No nested `token` claim (or one this can't parse a `scope` claim
-        // out of) - this bootstrap's pre-existing behavior, unchanged: see
-        // `../../ARCHITECTURE.md`'s "No nested-access-token validation" for
-        // why an absent/unparseable grant doesn't itself reject the
-        // request here.
+        // No nested `token` claim at all - this bootstrap's pre-existing,
+        // deliberately permissive default for a bare outer envelope: see
+        // `../../ARCHITECTURE.md`'s "No nested-access-token authentication".
         None => requested_types,
     };
     let matched = state.store.credentials_of_types(&effective_types);
@@ -218,27 +227,47 @@ async fn presentation_query(
 }
 
 /// The credential types the caller's own nested `token` claim actually
-/// grants, or `None` if there's no nested token to check at all (or it
-/// doesn't carry a `scope` claim this bootstrap can parse) - see
-/// `presentation_query`'s own doc comment for how the result is used.
+/// grants - see `presentation_query`'s own doc comment for how the result
+/// is used.
 ///
-/// This deliberately does **not** verify the nested token's own signature,
-/// `iss`/`sub` binding back to the outer envelope's caller, or expiry -
-/// that is the separate, larger "no nested-access-token validation" gap
-/// `../../ARCHITECTURE.md` documents (`cs_04_03_03_idTokenInvalidIssuerSub`/
-/// `cs_05_04_invalidTokenNotAuthorized`), out of this function's scope. All
-/// this checks is the one thing `cs_05_04_01_02_invalidScopeEscalationRequest`
-/// actually probes: what scope the token *claims* to have been granted,
-/// used only to narrow what's returned, never to widen this bootstrap's
-/// existing trust boundary (a forged/malformed nested token can only ever
-/// cause *less* to be returned, never more, since `presentation_query`
-/// intersects against it rather than trusting it outright).
-fn granted_credential_types(state: &AppState, claims: &Value) -> Option<Vec<String>> {
-    let nested_token = claims.get("token").and_then(Value::as_str)?;
-    let (_, _, nested_payload) = dcp_core::decode_jws_unverified(nested_token).ok()?;
-    let granted_scope = nested_payload.get("scope").and_then(Value::as_str)?;
+/// - `Ok(None)`: there is no nested `token` claim at all - this bootstrap's
+///   pre-existing, deliberately permissive default for a bare outer
+///   envelope (`../../ARCHITECTURE.md`'s "No nested-access-token
+///   authentication").
+/// - `Ok(Some(types))`: a nested token is present and was genuinely
+///   authenticated by `auth::verify_nested_access_token` (signature
+///   verified against its own resolved `did:web` issuer, not expired, and
+///   bound back to `outer_sub` via its own `aud` claim) - `types` is
+///   whatever its `scope` claim actually grants (empty if the token carries
+///   no `scope` claim at all: an authenticated-but-scopeless token grants
+///   nothing, rather than falling back to unrestricted access).
+/// - `Err(_)`: a nested token is present but failed authentication -
+///   `presentation_query` must reject the whole request outright, closing
+///   `cs_04_03_03_idTokenInvalidIssuerSub` (a nested token minted for/bound
+///   to a *different* party - a confused-deputy forward) and
+///   `cs_05_04_invalidTokenNotAuthorized` (a nested token that isn't even a
+///   real JWS) - see `auth::verify_nested_access_token`'s own doc comment.
+async fn granted_credential_types(
+    state: &AppState,
+    claims: &Value,
+    outer_sub: &str,
+) -> Result<Option<Vec<String>>, AuthError> {
+    let Some(nested_token) = claims.get("token").and_then(Value::as_str) else {
+        return Ok(None);
+    };
+    let nested_payload = verify_nested_access_token(
+        &state.http,
+        nested_token,
+        outer_sub,
+        state.config.insecure_http,
+    )
+    .await?;
+    let granted_scope = nested_payload
+        .get("scope")
+        .and_then(Value::as_str)
+        .unwrap_or("");
     let granted_scopes = identity_hub_core::scope::split_scope_string(granted_scope);
-    Some(state.scope_matcher.credential_types(&granted_scopes))
+    Ok(Some(state.scope_matcher.credential_types(&granted_scopes)))
 }
 
 fn build_presentation(
