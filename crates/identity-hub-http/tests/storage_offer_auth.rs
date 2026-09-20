@@ -114,6 +114,8 @@ fn valid_payload(caller: &ServiceIdentity, aud: &str) -> Value {
 
 fn credential_message_body() -> Value {
     json!({
+        "@context": ["https://w3id.org/dspace-dcp/v1.0/dcp.jsonld"],
+        "type": "CredentialMessage",
         "issuerPid": "issuer-pid-1",
         "holderPid": "holder-pid-1",
         "status": "ISSUED",
@@ -124,7 +126,13 @@ fn credential_message_body() -> Value {
 fn credential_offer_body(issuer_did: &str) -> Value {
     json!({
         "issuer": issuer_did,
-        "credentials": [],
+        // A full (non-sparse) CredentialObject - this file exercises
+        // authorization, not `crate::validation`'s own content checks (see
+        // message_content_validation.rs for those), so a self-describing
+        // entry avoids this fixture depending on a resolvable catalog.
+        "credentials": [
+            {"id": "test-credential", "type": "CredentialObject", "credentialType": "MembershipCredential"}
+        ],
     })
 }
 

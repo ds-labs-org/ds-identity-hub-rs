@@ -22,6 +22,10 @@ use identity_hub_core::sts::{self, StsTokenRequest};
 use crate::auth::{AuthError, check_trusted_issuer, verify_bearer_token};
 use crate::config::Mode;
 use crate::state::{AppState, RequestRecord};
+use crate::validation::{
+    ValidationError, check_known_holder_pid, validate_offer_credentials, validate_status,
+    verify_credential_proofs,
+};
 
 pub fn router(state: Arc<AppState>) -> Router {
     let mut router = Router::new()
@@ -51,6 +55,11 @@ fn bearer_header(headers: &HeaderMap) -> Option<&str> {
 fn auth_error_response(err: AuthError) -> Response {
     tracing::warn!(error = %err, "rejecting request: bearer token validation failed");
     (StatusCode::UNAUTHORIZED, err.to_string()).into_response()
+}
+
+fn validation_error_response(err: ValidationError) -> Response {
+    tracing::warn!(error = %err, "rejecting request: message content validation failed");
+    (StatusCode::BAD_REQUEST, err.to_string()).into_response()
 }
 
 // ---- DID hosting ----
@@ -282,6 +291,13 @@ fn build_presentation(
 /// otherwise-legitimate DID is still not this service's issuer. The nested
 /// `token` claim's own signature/binding is not checked here - see the same
 /// section for exactly what remains and why.
+///
+/// Once the token envelope and issuer are both trusted, the message *body*
+/// itself is validated too (`crate::validation`, added 2026-09-20): `status`
+/// must be a recognized value, `holderPid` must be one this service was
+/// configured to expect (`Config::known_holder_pids`), and every JWT-format
+/// embedded credential's own proof must genuinely verify - see
+/// `crate::validation`'s module doc comment for exactly what each closes.
 async fn storage_write(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -302,9 +318,24 @@ async fn storage_write(
     if let Err(err) = check_trusted_issuer(&claims, &state.config.trusted_issuer_dids) {
         return auth_error_response(err);
     }
+    if let Err(err) = validate_status(&message.status) {
+        return validation_error_response(err);
+    }
+    if let Err(err) = check_known_holder_pid(&message.holder_pid, &state.config.known_holder_pids) {
+        return validation_error_response(err);
+    }
+    if let Err(err) = verify_credential_proofs(
+        &state.http,
+        &message.credentials,
+        state.config.insecure_http,
+    )
+    .await
+    {
+        return validation_error_response(err);
+    }
     state.store.store(StoredCredentialBatch {
         issuer_pid: message.issuer_pid,
-        holder_pid: message.holder_pid,
+        holder_pid: Some(message.holder_pid),
         status: message.status,
         rejection_reason: message.rejection_reason,
         credentials: message.credentials,
@@ -323,7 +354,11 @@ async fn storage_write(
 /// trigger a holder-driven follow-up request - see `../../ARCHITECTURE.md`.
 /// Requires a valid Self-Issued ID Token addressed to this service, the
 /// same way `storage_write` does now (see that handler's doc comment,
-/// including the trusted-issuer allow-list check).
+/// including the trusted-issuer allow-list check). The offer's own
+/// `credentials` array is validated too (`crate::validation::validate_offer_credentials`,
+/// added 2026-09-20): it must be non-empty, and any *sparse* (id-only)
+/// entry must resolve against the offering issuer's own real Issuer
+/// Metadata API catalog.
 async fn credential_offer(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -343,6 +378,16 @@ async fn credential_offer(
     };
     if let Err(err) = check_trusted_issuer(&claims, &state.config.trusted_issuer_dids) {
         return auth_error_response(err);
+    }
+    if let Err(err) = validate_offer_credentials(
+        &state.http,
+        &message.issuer,
+        &message.credentials,
+        state.config.insecure_http,
+    )
+    .await
+    {
+        return validation_error_response(err);
     }
     let offer_id = state
         .store
@@ -527,7 +572,7 @@ async fn try_deliver_issued_credential(
         context: vec![identity_hub_core::messages::DCP_CONTEXT.to_string()],
         message_type: "CredentialMessage".to_string(),
         issuer_pid: request_id.to_string(),
-        holder_pid: Some(holder_pid.to_string()),
+        holder_pid: holder_pid.to_string(),
         status: "ISSUED".to_string(),
         credentials: vec![container],
         rejection_reason: None,

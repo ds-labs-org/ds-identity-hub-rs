@@ -71,6 +71,30 @@ pub struct Config {
     /// and `tests/dcp_tck.rs`, which passes the identical value here via
     /// [`Config::with_trusted_issuer_dids`].
     pub trusted_issuer_dids: Vec<String>,
+    /// Allow-list of `holderPid` correlation ids this Credential Service was
+    /// configured to expect on the Storage API (`POST /credentials`) - the
+    /// DCP spec's own correlation mechanism between a Credential Request and
+    /// the `CredentialMessage`(s) that eventually deliver it, distinct from
+    /// (and checked independently of) `trusted_issuer_dids`, which is about
+    /// *who* sent the message rather than *which request* it claims to
+    /// answer. Empty means no restriction is configured - this bootstrap's
+    /// permissive default (see `crate::validation::check_known_holder_pid`
+    /// and `../../ARCHITECTURE.md`'s "What's simplified or stubbed"), not a
+    /// claim that an empty list is a safe default for a real deployment: a
+    /// real Credential Service would populate this from its own
+    /// Credential-Request-tracking state as requests come in, which this
+    /// bootstrap's Credential Service mode does not yet keep (see
+    /// `../../ARCHITECTURE.md`'s "A holder-driven response to a Credential
+    /// Offer").
+    ///
+    /// Wired to the real `eclipse-dataspacetck/dcp-tck`'s own
+    /// `dataspacetck.credentials.correlation.id` SUT-configuration property
+    /// (`BaseAssembly::getHolderPid`, decompiled from
+    /// `eclipsedataspacetck/dcp-tck-runtime:latest` to confirm, not
+    /// guessed) - see `tests/dcp.tck.properties`, which pins it explicitly,
+    /// and `tests/dcp_tck.rs`, which passes the identical value here via
+    /// [`Config::with_known_holder_pids`].
+    pub known_holder_pids: Vec<String>,
 }
 
 impl Config {
@@ -95,6 +119,7 @@ impl Config {
             scope_pattern: DEFAULT_SCOPE_PATTERN.to_string(),
             insecure_http: true,
             trusted_issuer_dids: Vec::new(),
+            known_holder_pids: Vec::new(),
         }
     }
 
@@ -103,6 +128,13 @@ impl Config {
     /// need every call site updated just to opt in.
     pub fn with_trusted_issuer_dids(mut self, trusted_issuer_dids: Vec<String>) -> Self {
         self.trusted_issuer_dids = trusted_issuer_dids;
+        self
+    }
+
+    /// Builder-style setter for [`known_holder_pids`](Self::known_holder_pids),
+    /// mirroring [`Config::with_trusted_issuer_dids`].
+    pub fn with_known_holder_pids(mut self, known_holder_pids: Vec<String>) -> Self {
+        self.known_holder_pids = known_holder_pids;
         self
     }
 }

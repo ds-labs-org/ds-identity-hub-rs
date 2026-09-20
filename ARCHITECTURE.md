@@ -3,7 +3,7 @@
 **Status:** Bootstrap, working end to end against the real TCK (see "DCP TCK
 conformance snapshot" below). Not yet integrated with a live dataspace
 control plane, a real key-management/HSM backend, or a persistent store.
-**Date:** 2026-09-20 (six changes today: real per-request authorization
+**Date:** 2026-09-20 (seven changes today: real per-request authorization
 added to the Storage API and Credential Offer API; then `verify_bearer_token`
 gained `iss == sub`, `nbf`, `capabilityInvocation`, and `jti`-replay checks;
 then the Presentation API gained scope-escalation enforcement against the
@@ -13,9 +13,14 @@ API's accepted-offer record were rebuilt on a Contreforts-backed semantic
 RDF graph — see "Provenance: Contreforts"; then `verify_bearer_token`
 additionally rejects an `iat` (issued-at) claim in the future; then the
 Storage API and Credential Offer API gained a trusted-issuer allow-list
-check (`Config::trusted_issuer_dids`); see "What's simplified or stubbed"
-and "DCP TCK conformance snapshot" below — 36 -> 22 -> 12 -> 11 -> 9 -> 8
-real TCK failures, each step TDD'd and re-measured, not assumed)
+check (`Config::trusted_issuer_dids`); then the Storage API and Credential
+Offer API gained real message-content/business-logic validation (required
+`CredentialMessage` fields, a `status` allow-list, a known-`holderPid`
+allow-list, genuine embedded-credential proof verification, and offer
+`credentials`-array/catalog checks — see `identity_hub_http::validation`);
+see "What's simplified or stubbed" and "DCP TCK conformance snapshot" below
+— 36 -> 22 -> 12 -> 11 -> 9 -> 8 -> 2 real TCK failures, each step TDD'd and
+re-measured, not assumed)
 
 This file records the scope and design decisions behind this project's
 bootstrap, why each was made, and an honest accounting of what actually
@@ -229,9 +234,11 @@ what stays project-specific, and why:**
   credential payload itself (an opaque JWS string for `format: "jwt"`, a
   JSON-LD document for others), so there is no decomposed `vc:issuer`/
   `vc:credentialSubject` to extract without parsing (and likely
-  half-verifying) claims a storage layer has no business interpreting —
-  see "No message-content/business-logic validation..." above, which this
-  change deliberately leaves untouched. `payload` is stored as the literal
+  half-verifying) claims a storage layer has no business interpreting — see
+  "Message-content/business-logic validation..." above: proof verification
+  happens one layer up, in `identity_hub_http::validation`, *before* a
+  batch ever reaches this store, so the store itself stays exactly this
+  unopinionated. `payload` is stored as the literal
   JSON serialization of the original `serde_json::Value`, so it round-trips
   losslessly regardless of shape.
 - An accepted `CredentialOfferMessage` becomes a
@@ -536,19 +543,81 @@ including the first (wrong) fixes tried along the way).
   `cs_06_06_01_credentialOfferMessage_iatInFuture` (11 -> 9), confirmed
   against the real TCK, reproduced identically twice, with zero regressions
   on the other 45 tests (the 43 previously passing plus these 2).
-- **No message-content/business-logic validation on the Storage API or
-  Credential Offer API**, independent of the wrapping Self-Issued ID Token:
-  no schema/enum validation of the `CredentialMessage`/
-  `CredentialOfferMessage` body itself (any `status` string is accepted;
-  any body that merely deserializes is accepted), no check that a
-  `CredentialMessage`'s `holderPid` matches a request this Issuer Service
-  actually issued, no verification of a stored credential's own embedded
-  proof, and no validation of a `CredentialOfferMessage`'s credential ids
-  against a known catalog. Six TCK tests fail for exactly this reason — see
-  "DCP TCK conformance snapshot"'s category 4. (Scope-based authorization
-  against a caller's own granted scope was part of "No nested-access-token
-  authentication" above until today's third change closed it — see
-  "Scope-escalation enforcement" above.)
+- **Message-content/business-logic validation on the Storage API and
+  Credential Offer API, added 2026-09-20 (seventh change today).** Before
+  this, `storage_write`/`credential_offer` validated only the wrapping
+  Self-Issued ID Token envelope and issuer — the message *body* itself was
+  accepted unconditionally once those passed: any `status` string, any
+  `holderPid`, an unverified embedded credential proof, an empty or
+  catalog-mismatched offer. Investigated by decompiling the real TCK's own
+  `CredentialIssuanceTest`/`CredentialOfferTest` and their shared
+  `org.eclipse.dataspacetck.dcp.system.cs` model classes
+  (`eclipsedataspacetck/dcp-tck-runtime:latest`), not guessed from test
+  names alone — see `identity_hub_http::validation`'s own module doc
+  comment for the full per-check reasoning. Four independent fixes, all in
+  the new `identity-hub-http/src/validation.rs`:
+  - `CredentialMessage`'s `@context`/`type`/`issuerPid`/`holderPid`/`status`
+    are now all required fields (`identity-hub-core/src/messages.rs`: no
+    permissive `#[serde(default)]`, `holder_pid` no longer
+    `Option<String>`) — a message missing any of them now fails to
+    deserialize, which axum's `Json` extractor already turns into a `400`;
+    no separate validation code needed for this specific gap. Closes
+    `cs_06_05_01_credentialMessage_invalidBody`.
+  - `validation::validate_status` rejects a `status` outside `{"ISSUED",
+    "REJECTED"}` — the same two values the real TCK's own, decompiled
+    `org.eclipse.dataspacetck.dcp.system.cs.CredentialMessage.validate()`
+    checks against. Closes `cs_06_05_01_credentialMessage_invalidStatus`.
+  - `validation::check_known_holder_pid`, checked against the new
+    `Config::known_holder_pids` (empty means no restriction, this
+    bootstrap's permissive default, the same posture
+    `Config::trusted_issuer_dids` already established), rejects a
+    `holderPid` this service wasn't configured to expect. Wired in
+    `tests/dcp.tck.properties`/`tests/dcp_tck.rs` to the TCK's own fixed
+    `dataspacetck.credentials.correlation.id` (`BaseAssembly::getHolderPid`,
+    decompiled to confirm). This bootstrap's Credential Service mode
+    doesn't yet track outstanding Credential Requests of its own (see "A
+    holder-driven response to a Credential Offer" below) — a real
+    deployment would populate this allow-list from that state as requests
+    come in, not from a fixed config value. Closes
+    `cs_06_05_credentialMessage_unknownHolderPid`.
+  - `validation::verify_credential_proofs` genuinely verifies every
+    JWT-format embedded credential's own JWS proof: resolves the
+    credential's own `iss` claim's `did:web` document, finds the
+    verification method named by the JWS `kid` header, and checks the
+    signature — reusing `crate::auth::verify_bearer_token`'s own
+    primitives (`dcp_core::{resolve_did, find_verifying_key,
+    verify_jws_signature}`), not a reimplementation. A non-JWT-format
+    container is left opaque and unverified, matching
+    `identity_hub_graph::store`'s own stance on non-JWT payloads. Closes
+    `cs_06_05_02_credentialMessage_unverifiableProof`.
+  - `validation::validate_offer_credentials` rejects an empty
+    `CredentialOfferMessage.credentials` array outright, and — for a
+    *sparse* (id-only, no `credentialType`) entry specifically — resolves
+    the offering issuer's own `IssuerService` DID-document entry and
+    fetches its real Issuer Metadata API (`GET <endpoint>/metadata`,
+    `identity_hub_core::messages::IssuerMetadata` now also `Deserialize`)
+    to check the id against that issuer's own catalog; a *full* entry
+    (`credentialType` present) is self-describing and needs no catalog
+    lookup at all — confirmed, not guessed, by the TCK's own
+    always-passing default offer using an unregistered random id but
+    always carrying a `credentialType`, while only the id-only "sparse"
+    variants are checked against a catalog (one with real, known ids,
+    expecting `2xx`; one with random ids, expecting `4xx`). Closes
+    `cs_06_06_01_credentialOfferMessage_emptyCredentials` and
+    `cs_06_06_01_credentialOfferMessage_sparse_randomIds_expect400`.
+
+  TDD'd: `tests/message_content_validation.rs` asserts all six red-then-green
+  (plus regression guards for each: recognized statuses, a known
+  `holderPid`, a genuinely verifiable proof, a full offer entry needing no
+  catalog, and a sparse offer whose ids the catalog does recognize) against
+  the real HTTP layer, no TCK/Docker dependency. Real, measured effect:
+  closed exactly the six tests named above (8 -> 2), confirmed against the
+  real TCK, reproduced identically twice, with zero regressions on the
+  other 46 previously-passing tests. (Scope-based authorization against a
+  caller's own granted scope was part of "No nested-access-token
+  authentication" above until an earlier change today closed it — see
+  "Scope-escalation enforcement" above; that gap is unrelated to, and
+  unchanged by, this one.)
 - **No revocation status checking** (`StatusList2021`/
   `BitstringStatusList`) on presented or stored credentials.
 - **No durable storage, but real semantic structure now (2026-09-20).**
@@ -603,19 +672,20 @@ including the first (wrong) fixes tried along the way).
 ## DCP TCK conformance snapshot
 
 **Run against a real, locally running `eclipsedataspacetck/dcp-tck-runtime:latest`
-container — 2026-09-20**, after five changes today: adding real
+container — 2026-09-20**, after seven changes today: adding real
 per-request authorization to the Storage API and Credential Offer API;
 adding the `iss == sub`/`nbf`/`capabilityInvocation`/`jti`-replay checks to
 `verify_bearer_token`; adding scope-escalation enforcement to
 `presentation_query` against the caller's own nested access-token grant;
-adding an `iat`-in-the-future check to `verify_bearer_token`; then adding a
-trusted-issuer allow-list check to the Storage API and Credential Offer API
-(see "What's simplified or stubbed" for all five). Not fabricated:
+adding an `iat`-in-the-future check to `verify_bearer_token`; adding a
+trusted-issuer allow-list check to the Storage API and Credential Offer API;
+then adding real message-content/business-logic validation to both (see
+"What's simplified or stubbed" for all seven). Not fabricated:
 `tests/dcp_tck.rs` boots this crate's real Credential Service in-process
 and drives the actual, official TCK container against it via
 `testcontainers`, exactly as it runs in CI. Reproduced identically twice
-with an 8-failure set immediately after the fifth change (and the prior
-9-failure result was itself reproduced twice before that change, per the
+with a 2-failure set immediately after the seventh change (and the prior
+8-failure result was itself reproduced twice before that change, per the
 previous snapshot) before being written down here.
 
 Scoped to the Credential Service test packages
@@ -625,75 +695,68 @@ Scoped to the Credential Service test packages
 | Test package | Total | Passed | Failed |
 |---|---:|---:|---:|
 | `presentation.cs` (VPP) | 23 | 21 | 2 |
-| `issuance.cs` (CIP) | 31 | 25 | 6 |
-| **Total** | **54** | **46** | **8** |
+| `issuance.cs` (CIP) | 31 | 31 | 0 |
+| **Total** | **54** | **52** | **2** |
 
-(`issuance.cs` gained 1 pass this change —
-`cs_06_05_01_credentialMessage_untrustedIssuer`; `presentation.cs` is
-unchanged, since the TCK only probes the trusted-issuer allow-list on the
-Storage API, part of `issuance.cs`. Re-derived directly from the TCK's own
-stack traces, which name the failing test's class and package
-unambiguously.)
+(`issuance.cs` gained all 6 of its remaining failures this change — the
+message-content/business-logic checks below; `presentation.cs` is
+unchanged, since none of the six probe the Presentation API. Re-derived
+directly from the TCK's own stack traces, which name the failing test's
+class and package unambiguously.)
 
-`tests/dcp_tck.rs`'s `EXPECTED_FAILURES` asserts the **exact** set of 8
-failing test method names (not just the count) — a regression on any of the
-46 currently-passing tests, or any new/different failure, fails that test;
-so does the TCK reporting fewer than 8 failures without a matching update
-here (a sign the claims above have gone stale). The 8 fall into two
-categories, matching "What's simplified or stubbed" above (see
-`EXPECTED_FAILURES`'s own comments for the full per-category test list and
-the reasoning, drawn from reading the real TCK's own source):
+`tests/dcp_tck.rs`'s `EXPECTED_FAILURES` asserts the **exact** set of 2
+failing test method names (not just the count) — a regression on either of
+the 52 currently-passing tests, or any new/different failure, fails that
+test; so does the TCK reporting fewer than 2 failures without a matching
+update here (a sign the claims above have gone stale). Both remaining
+failures are **one gap with two severities: no nested-access-token
+authentication** — `cs_04_03_03_idTokenInvalidIssuerSub`,
+`cs_05_04_invalidTokenNotAuthorized`: the nested `token` claim (the actual
+Verifiable-Presentation access token) has its `scope` claim read and
+enforced (closing `cs_05_04_01_02_invalidScopeEscalationRequest` in an
+earlier change today), but its signature is still never verified, and
+nothing binds it back to the outer envelope's caller. Confirmed by reading
+`PresentationFlowSection4Test`/`PresentationFlowSection5Test` in
+`eclipse-dataspacetck/dcp-tck` to understand exactly what each still needs:
+`idTokenInvalidIssuerSub` a nested-token iss/sub binding check (its outer
+envelope is perfectly valid; the *nested* token was minted for a different
+party), `invalidTokenNotAuthorized` actual signature verification (its
+nested token, `"faketoken"`, isn't a JWS at all - this bootstrap's scope
+check simply can't decode it and falls back to no restriction, rather than
+rejecting the request). See `EXPECTED_FAILURES`'s own comment for the full
+reasoning.
 
-1. **No nested-access-token authentication (2 of 8)** —
-   `cs_04_03_03_idTokenInvalidIssuerSub`, `cs_05_04_invalidTokenNotAuthorized`:
-   the nested `token` claim (the actual Verifiable-Presentation access
-   token) has its `scope` claim read and enforced (closing
-   `cs_05_04_01_02_invalidScopeEscalationRequest` in an earlier change
-   today), but its signature is still never verified, and nothing binds it
-   back to the outer envelope's caller. One gap, two remaining severities;
-   confirmed by reading `PresentationFlowSection4Test`/
-   `PresentationFlowSection5Test` in `eclipse-dataspacetck/dcp-tck` to
-   understand exactly what each still needs: `idTokenInvalidIssuerSub` a
-   nested-token iss/sub binding check (its outer envelope is perfectly
-   valid; the *nested* token was minted for a different party),
-   `invalidTokenNotAuthorized` actual signature verification (its nested
-   token, `"faketoken"`, isn't a JWS at all - this bootstrap's scope check
-   simply can't decode it and falls back to no restriction, rather than
-   rejecting the request).
-2. **Message-content/business-logic validation, unrelated to the token
-   wrapper (6 of 8)** — a schema/enum-invalid `CredentialMessage` body, an
-   invalid `status` value, an unverifiable embedded credential proof, an
-   unknown `holderPid`, an empty `CredentialOfferMessage.credentials`
-   array, and offered credential ids that don't match a known catalog. All
-   six present a genuinely valid, genuinely *trusted* Self-Issued ID Token
-   (now checked against `iss == sub`/`aud`/`exp`/`nbf`/`iat`/
-   `capabilityInvocation`/`jti`-replay, and against the trusted-issuer
-   allow-list); this bootstrap simply doesn't validate the message body
-   itself yet.
+**What changed from the previous (8-failure) snapshot:** all six remaining
+message-content/business-logic tests moved from failing to passing -
+`cs_06_05_01_credentialMessage_invalidBody`,
+`cs_06_05_01_credentialMessage_invalidStatus`,
+`cs_06_05_02_credentialMessage_unverifiableProof`,
+`cs_06_05_credentialMessage_unknownHolderPid`,
+`cs_06_06_01_credentialOfferMessage_emptyCredentials`, and
+`cs_06_06_01_credentialOfferMessage_sparse_randomIds_expect400` - closed by
+the new `identity_hub_http::validation` module, wired into `storage_write`
+and `credential_offer` (see "What's simplified or stubbed"). Nothing
+regressed: every test that passed before still passes (confirmed by the
+same exact-set assertion, not just a count). The previous snapshot's
+"Message-content/business-logic validation" category is gone entirely; only
+the nested-access-token-authentication gap remains.
 
-**What changed from the previous (9-failure) snapshot:** exactly one test
-moved from failing to passing - `cs_06_05_01_credentialMessage_untrustedIssuer`,
-closed by adding a trusted-issuer allow-list check to `storage_write` and
-`credential_offer` (see "What's simplified or stubbed"). Nothing regressed:
-every test that passed before still passes (confirmed by the same
-exact-set assertion, not just a count). The previous snapshot's "No
-'trusted issuer' allow-list check" category is gone entirely; the
-remaining three categories from earlier snapshots collapse to two now that
-it's closed.
-
-What's genuinely proven working by the **46 passing tests**: everything the
-previous 45-passing snapshot proved (real `did:web` hosting and
+What's genuinely proven working by the **52 passing tests**: everything the
+previous 46-passing snapshot proved (real `did:web` hosting and
 Credential-Service-endpoint discovery, the Storage/Offer APIs'
 authorization rejections for every *shape*-level token defect, all four
 endpoints' `iss == sub`/`nbf`/`iat`/`capabilityInvocation`/`jti`-replay
-checks, and the Presentation API's scope-escalation filtering) plus, new in
-this snapshot, the Storage API and Credential Offer API genuinely rejecting
-an otherwise-valid Self-Issued ID Token whose issuer isn't on the
-configured trusted-issuer allow-list - real, TDD'd, and TCK-confirmed, not
-assumed (see `tests/trusted_issuer_allowlist.rs` for the same
-assertion made directly against the HTTP layer, without a TCK/Docker
-dependency, alongside a regression guard that a caller on the allow-list is
-still accepted).
+checks, the Presentation API's scope-escalation filtering, and the
+trusted-issuer allow-list) plus, new in this snapshot: the Storage API
+genuinely rejecting a `CredentialMessage` missing a required field, an
+unrecognized `status`, an unknown `holderPid`, or an embedded credential
+whose proof doesn't verify; and the Credential Offer API genuinely
+rejecting an empty `credentials` array or a sparse (id-only) offer whose
+ids don't match the offering issuer's own real Issuer Metadata API catalog
+- real, TDD'd, and TCK-confirmed, not assumed (see
+`tests/message_content_validation.rs` for the same assertions made
+directly against the HTTP layer, without a TCK/Docker dependency, alongside
+regression guards for every accept path).
 
 Run it yourself: `cargo test -p identity-hub-http --test dcp_tck --
 --ignored --nocapture` (needs Docker). See `tests/dcp_tck.rs`'s module doc
@@ -704,9 +767,10 @@ coverage of the authorization behavior, see
 authorization itself), `cargo test -p identity-hub-http --test
 si_token_validation` (the outer-envelope token-content checks, including
 `iat`), `cargo test -p identity-hub-http --test
-presentation_scope_enforcement` (the scope-escalation check), and `cargo
-test -p identity-hub-http --test trusted_issuer_allowlist` (the
-trusted-issuer allow-list check).
+presentation_scope_enforcement` (the scope-escalation check), `cargo test
+-p identity-hub-http --test trusted_issuer_allowlist` (the trusted-issuer
+allow-list check), and `cargo test -p identity-hub-http --test
+message_content_validation` (the message-content/business-logic checks).
 
 ## Continuous integration
 
@@ -769,11 +833,17 @@ ds-identity-hub-rs/
       src/
         config.rs          Mode/Config: which role, bind address, own
                             did:web host, STS credentials, scope pattern,
-                            trusted-issuer allow-list.
+                            trusted-issuer allow-list, known-holder-pid
+                            allow-list.
         state.rs           AppState: identity, STS-party identity, store,
                             reqwest client (host.docker.internal override).
         auth.rs             Self-Issued ID Token validation, plus the
                             separate trusted-issuer allow-list check.
+        validation.rs        Message-content/business-logic validation:
+                            CredentialMessage status allow-list, known-
+                            holderPid check, embedded-credential proof
+                            verification, CredentialOfferMessage
+                            non-empty/catalog checks.
         handlers.rs         All HTTP routes for both modes.
         main.rs             CLI: `identity-hub credential-service|issuer-service`;
                             also runs the one-off Contreforts round-trip
@@ -792,6 +862,10 @@ ds-identity-hub-rs/
         trusted_issuer_allowlist.rs
                                   Trusted-issuer allow-list check on the
                                   Storage/Offer APIs (real HTTP, no
+                                  Docker/TCK needed).
+        message_content_validation.rs
+                                  Message-content/business-logic checks on
+                                  the Storage/Offer APIs (real HTTP, no
                                   Docker/TCK needed).
   vendor/
     contreforts-core/      Git submodule (contreforts-ai/contreforts-core),
@@ -834,3 +908,6 @@ to `true`, matching this bootstrap's local/test-only scope.
 for a Credential Service's Storage/Offer APIs; omitted, it defaults to
 empty (no restriction configured) - see that field's doc comment for why
 that's this bootstrap's default rather than a recommendation.
+`--known-holder-pid` (repeatable) populates `Config::known_holder_pids` for
+the Storage API's `holderPid` check the same way; also empty by default -
+see that field's doc comment.

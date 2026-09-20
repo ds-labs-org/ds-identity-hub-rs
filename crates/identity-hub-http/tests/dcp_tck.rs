@@ -106,12 +106,72 @@ const TCK_CALLBACK_PORT: u16 = 19183;
 /// pins it (`dataspacetck.did.issuer`) - the DID this test's own Credential
 /// Service is configured to trust, per `Config::trusted_issuer_dids`.
 const TCK_ISSUER_DID: &str = "did:web:host.docker.internal%3A19183:issuer";
+/// The TCK's own fixed `holderPid` correlation id, exactly as
+/// `tests/dcp.tck.properties` pins it
+/// (`dataspacetck.credentials.correlation.id`) - the `holderPid` this test's
+/// own Credential Service is configured to expect, per
+/// `Config::known_holder_pids`. See `BaseAssembly::getHolderPid`
+/// (decompiled from `eclipsedataspacetck/dcp-tck-runtime:latest`): every
+/// `@HolderPid`-annotated test parameter resolves to this same fixed value
+/// unless a test overrides it with its own
+/// `dataspacetck.credentials.correlation.id.<method>` property, which this
+/// file's properties do not.
+const TCK_HOLDER_PID: &str = "bootstrap-correlation-id";
 
 /// The exact TCK test method names expected to fail against this
 /// bootstrap, and why. See this file's module doc comment for what
 /// asserting an exact set (rather than "no failures") buys, and
 /// `../../ARCHITECTURE.md`'s "DCP TCK conformance snapshot" for the full,
 /// categorized narrative this list summarizes.
+///
+/// **2026-09-20 update (sixth change today):** `storage_write` and
+/// `credential_offer` (`../src/handlers.rs`) now also validate the message
+/// *body* itself, via the new `identity_hub_http::validation` module -
+/// distinct from, and applied after, every token/issuer check above, since
+/// every one of the six tests this closes presents a genuinely valid,
+/// genuinely trusted token. Investigated by decompiling the real TCK's own
+/// `CredentialIssuanceTest`/`CredentialOfferTest` and their shared
+/// `org.eclipse.dataspacetck.dcp.system.cs` model classes (`CredentialMessage`/
+/// `CredentialOfferMessage`/`CredentialObject`), not guessed from test names
+/// alone - see `identity_hub_http::validation`'s own module doc comment for
+/// the full per-check reasoning. Four independent fixes:
+///
+/// - `CredentialMessage`'s `@context`/`type`/`issuerPid`/`holderPid`/
+///   `status` are now all required fields (no permissive `#[serde(default)]`,
+///   `holder_pid` no longer `Option<String>`) - a message missing any of
+///   them now fails to deserialize, which axum's `Json` extractor already
+///   turns into a `400`. Closes `cs_06_05_01_credentialMessage_invalidBody`.
+/// - `validation::validate_status` rejects a `status` outside `{"ISSUED",
+///   "REJECTED"}` (the same two values the real TCK's own, decompiled
+///   `CredentialMessage.validate()` checks). Closes
+///   `cs_06_05_01_credentialMessage_invalidStatus`.
+/// - `validation::check_known_holder_pid`, checked against the new
+///   `Config::known_holder_pids` (wired here to [`TCK_HOLDER_PID`], the
+///   TCK's own fixed `dataspacetck.credentials.correlation.id`), rejects a
+///   `holderPid` this service wasn't configured to expect. Closes
+///   `cs_06_05_credentialMessage_unknownHolderPid`.
+/// - `validation::verify_credential_proofs` genuinely verifies every
+///   JWT-format embedded credential's own JWS proof (resolve its `iss`'s
+///   `did:web` document, find the `kid`'s verification method, check the
+///   signature) - reusing `crate::auth::verify_bearer_token`'s own
+///   primitives, not a reimplementation. Closes
+///   `cs_06_05_02_credentialMessage_unverifiableProof`.
+/// - `validation::validate_offer_credentials` rejects an empty
+///   `CredentialOfferMessage.credentials` array outright, and - for a
+///   *sparse* (id-only, no `credentialType`) entry specifically - resolves
+///   the offering issuer's own `IssuerService` DID-document entry and
+///   fetches its real Issuer Metadata API (`GET <endpoint>/metadata`) to
+///   check the id against that issuer's own catalog; a *full* entry
+///   (`credentialType` present) is self-describing and needs no catalog
+///   lookup at all, confirmed by the TCK's own always-passing default offer
+///   using an unregistered random id but always carrying a `credentialType`.
+///   Closes `cs_06_06_01_credentialOfferMessage_emptyCredentials` and
+///   `cs_06_06_01_credentialOfferMessage_sparse_randomIds_expect400`.
+///
+/// TDD'd in `tests/message_content_validation.rs` (all six red-then-green
+/// against the real HTTP layer, no TCK/Docker dependency), confirmed against
+/// the real TCK, reproduced identically twice, with zero regressions on the
+/// other 46 previously-passing tests (8 -> 2).
 ///
 /// **2026-09-20 update (fifth change today):** `storage_write` and
 /// `credential_offer` (`../src/handlers.rs`) now enforce a trusted-issuer
@@ -181,49 +241,37 @@ const TCK_ISSUER_DID: &str = "did:web:host.docker.internal%3A19183:issuer";
 /// `nbfViolated`/`jtiAlreadyUsed` (both endpoints). The 11 that remain fall
 /// into four categories:
 const EXPECTED_FAILURES: &[&str] = &[
-    // 1. The nested `token` claim (the actual Verifiable-Presentation
-    // access token a caller forwards inside its Self-Issued ID Token) is
-    // never itself *authenticated* - `verify_bearer_token` checks the
-    // *outer* envelope (now including iss==sub/nbf/capabilityInvocation/jti)
-    // and, as of today's third change, does read the nested token's own
-    // `scope` claim to enforce it (closing `invalidScopeEscalationRequest`,
-    // no longer listed here) - but its *signature* is still never verified,
-    // and nothing binds it back to the outer envelope's own caller. Both
-    // failures below are that one remaining gap, confirmed by reading the
-    // real TCK's own source (`PresentationFlowSection4Test`/
-    // `PresentationFlowSection5Test` in `eclipse-dataspacetck/dcp-tck`), not
-    // guessed from test names alone: `idTokenInvalidIssuerSub`'s outer
-    // envelope is a perfectly valid, correctly self-issued token
-    // (iss==sub==thirdPartyDid, real signature, real capabilityInvocation)
-    // that forwards a nested access token originally minted for a
-    // *different* party (the verifier) - a confused-deputy case only a
-    // nested-token iss/sub binding check would catch (this bootstrap's new
-    // scope check reads the `scope` claim but never checks who signed it or
-    // for whom, so a forwarded token with someone else's genuinely-granted
-    // scope still passes); `invalidTokenNotAuthorized` forwards a nested
-    // token that isn't even a real JWS ("faketoken") inside an
-    // otherwise-valid outer envelope - this bootstrap's `granted_credential_types`
-    // (`../src/handlers.rs`) fails to decode it and falls back to *no*
-    // restriction being applied (the pre-existing, unauthenticated-scope
-    // default), rather than the outright rejection this test expects.
+    // The nested `token` claim (the actual Verifiable-Presentation access
+    // token a caller forwards inside its Self-Issued ID Token) is never
+    // itself *authenticated* - `verify_bearer_token` checks the *outer*
+    // envelope (now including iss==sub/nbf/capabilityInvocation/jti) and
+    // does read the nested token's own `scope` claim to enforce it (closing
+    // `invalidScopeEscalationRequest`, no longer listed here) - but its
+    // *signature* is still never verified, and nothing binds it back to the
+    // outer envelope's own caller. Both failures below are that one
+    // remaining gap, confirmed by reading the real TCK's own source
+    // (`PresentationFlowSection4Test`/`PresentationFlowSection5Test` in
+    // `eclipse-dataspacetck/dcp-tck`), not guessed from test names alone:
+    // `idTokenInvalidIssuerSub`'s outer envelope is a perfectly valid,
+    // correctly self-issued token (iss==sub==thirdPartyDid, real signature,
+    // real capabilityInvocation) that forwards a nested access token
+    // originally minted for a *different* party (the verifier) - a
+    // confused-deputy case only a nested-token iss/sub binding check would
+    // catch (this bootstrap's scope check reads the `scope` claim but never
+    // checks who signed it or for whom, so a forwarded token with someone
+    // else's genuinely-granted scope still passes); `invalidTokenNotAuthorized`
+    // forwards a nested token that isn't even a real JWS ("faketoken")
+    // inside an otherwise-valid outer envelope - this bootstrap's
+    // `granted_credential_types` (`../src/handlers.rs`) fails to decode it
+    // and falls back to *no* restriction being applied (the pre-existing,
+    // unauthenticated-scope default), rather than the outright rejection
+    // this test expects. A real fix here is nested-token signature
+    // verification plus an iss/sub binding check back to the outer
+    // envelope's caller - out of this bootstrap's scope so far; see
+    // `../../ARCHITECTURE.md`'s "What's simplified or stubbed" ("No
+    // nested-access-token authentication").
     "cs_04_03_03_idTokenInvalidIssuerSub",
     "cs_05_04_invalidTokenNotAuthorized",
-    // 2. Message-content/business-logic validation this bootstrap does not
-    // implement, unrelated to the wrapping Self-Issued ID Token (a
-    // genuinely valid token, now checked against `iss == sub`/`aud`/`exp`/
-    // `nbf`/`iat`/`capabilityInvocation`/`jti`-replay too, is presented in
-    // every one of these cases) - unchanged from the previous snapshot: no
-    // schema/enum validation of the `CredentialMessage`/
-    // `CredentialOfferMessage` body itself, no check that `holderPid`
-    // matches a request this process actually issued, no verification of a
-    // stored credential's own embedded proof, and no validation of a
-    // `CredentialOfferMessage`'s credential ids against a known catalog.
-    "cs_06_05_01_credentialMessage_invalidBody",
-    "cs_06_05_01_credentialMessage_invalidStatus",
-    "cs_06_05_02_credentialMessage_unverifiableProof",
-    "cs_06_05_credentialMessage_unknownHolderPid",
-    "cs_06_06_01_credentialOfferMessage_emptyCredentials",
-    "cs_06_06_01_credentialOfferMessage_sparse_randomIds_expect400",
 ];
 
 #[tokio::test]
@@ -240,7 +288,8 @@ async fn dcp_tck_matches_documented_credential_service_scope() {
         SocketAddr::from(([0, 0, 0, 0], SERVER_PORT)),
         format!("host.docker.internal:{SERVER_PORT}"),
     )
-    .with_trusted_issuer_dids(vec![TCK_ISSUER_DID.to_string()]);
+    .with_trusted_issuer_dids(vec![TCK_ISSUER_DID.to_string()])
+    .with_known_holder_pids(vec![TCK_HOLDER_PID.to_string()]);
     let (_state, router) = identity_hub_http::build(config.clone());
     tokio::spawn(async move {
         let _ = identity_hub_http::serve(&config, router).await;

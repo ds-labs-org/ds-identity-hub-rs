@@ -95,6 +95,8 @@ fn sign(caller: &ServiceIdentity, payload: Value) -> String {
 
 fn credential_message_body() -> Value {
     json!({
+        "@context": ["https://w3id.org/dspace-dcp/v1.0/dcp.jsonld"],
+        "type": "CredentialMessage",
         "issuerPid": "issuer-pid-1",
         "holderPid": "holder-pid-1",
         "status": "ISSUED",

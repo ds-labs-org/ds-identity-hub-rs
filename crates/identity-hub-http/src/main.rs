@@ -54,6 +54,13 @@ struct CommonArgs {
     /// recommendation for a real deployment.
     #[arg(long = "trusted-issuer-did")]
     trusted_issuer_dids: Vec<String>,
+    /// A `holderPid` this Credential Service should accept on the Storage
+    /// API (may be repeated). Empty (the default) means no restriction is
+    /// configured - see `Config::known_holder_pids`'s doc comment for why
+    /// that's this bootstrap's default, not a recommendation for a real
+    /// deployment.
+    #[arg(long = "known-holder-pid")]
+    known_holder_pids: Vec<String>,
 }
 
 impl CommonArgs {
@@ -70,6 +77,7 @@ impl CommonArgs {
             scope_pattern: self.scope_pattern,
             insecure_http: self.insecure_http,
             trusted_issuer_dids: self.trusted_issuer_dids,
+            known_holder_pids: self.known_holder_pids,
         }
     }
 }

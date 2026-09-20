@@ -87,25 +87,33 @@ pub struct CredentialContainer {
 /// `POST /credentials` request body on the Storage API (Issuer Service ->
 /// Credential Service). See
 /// `credential.issuance.protocol.md#credential-message`.
+///
+/// `@context`/`type`/`issuerPid`/`holderPid`/`status` are all **required**
+/// (no `#[serde(default)]`) - confirmed, not guessed, by decompiling the
+/// real `eclipsedataspacetck/dcp-tck-runtime:latest`'s own
+/// `CredentialIssuanceTest.cs_06_05_01_credentialMessage_invalidBody`, which
+/// removes each of these five fields in turn and expects a `4xx` every
+/// time. Before this, `context`/`message_type` had permissive serde
+/// defaults and `holder_pid` was `Option<String>`, so a message missing any
+/// of the three was silently accepted rather than rejected - see
+/// `../../ARCHITECTURE.md`'s "What's simplified or stubbed". A message
+/// missing one of these now fails to deserialize at all, which axum's
+/// `Json` extractor already turns into a `400 Bad Request` - no separate
+/// validation code needed for this specific gap.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CredentialMessage {
-    #[serde(rename = "@context", default = "dcp_context")]
+    #[serde(rename = "@context")]
     pub context: Vec<String>,
-    #[serde(rename = "type", default = "credential_message_type")]
+    #[serde(rename = "type")]
     pub message_type: String,
     pub issuer_pid: String,
-    #[serde(default)]
-    pub holder_pid: Option<String>,
+    pub holder_pid: String,
     pub status: String,
     #[serde(default)]
     pub credentials: Vec<CredentialContainer>,
     #[serde(default)]
     pub rejection_reason: Option<String>,
-}
-
-fn credential_message_type() -> String {
-    "CredentialMessage".to_string()
 }
 
 // ---- Credential Issuance Protocol: Credential Request API ----
@@ -212,15 +220,21 @@ fn credential_offer_message_type() -> String {
 
 /// `GET /metadata` response body. See
 /// `credential.issuance.protocol.md#issuermetadata`.
-#[derive(Debug, Clone, Serialize)]
+///
+/// `Deserialize` (not just `Serialize`) because `identity-hub-http`'s own
+/// Credential Offer API handler is also a *client* of this shape: resolving
+/// a sparse `CredentialOfferMessage` entry's id against the offering
+/// issuer's own real Issuer Metadata API means fetching and parsing exactly
+/// this response - see `identity_hub_http::validation::validate_offer_credentials`.
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct IssuerMetadata {
-    #[serde(rename = "@context")]
+    #[serde(rename = "@context", default = "dcp_context")]
     pub context: Vec<String>,
-    #[serde(rename = "type")]
+    #[serde(rename = "type", default)]
     pub message_type: String,
     pub issuer: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub credentials_supported: Option<Vec<CredentialObject>>,
 }
 
@@ -279,9 +293,32 @@ mod tests {
         }"#;
         let msg: CredentialMessage = serde_json::from_str(json).unwrap();
         assert_eq!(msg.issuer_pid, "issuerPid");
-        assert_eq!(msg.holder_pid.as_deref(), Some("holderPid"));
+        assert_eq!(msg.holder_pid, "holderPid");
         assert_eq!(msg.status, "ISSUED");
         assert_eq!(msg.credentials[0].credential_type, "MembershipCredential");
+    }
+
+    #[test]
+    fn credential_message_rejects_a_body_missing_a_required_field() {
+        // Mirrors the real dcp-tck's own
+        // `CredentialIssuanceTest.cs_06_05_01_credentialMessage_invalidBody`:
+        // each of these five fields is required - see `CredentialMessage`'s
+        // own doc comment.
+        for missing in ["@context", "type", "issuerPid", "holderPid", "status"] {
+            let mut body = serde_json::json!({
+                "@context": ["https://w3id.org/dspace-dcp/v1.0/dcp.jsonld"],
+                "type": "CredentialMessage",
+                "issuerPid": "issuerPid",
+                "holderPid": "holderPid",
+                "status": "ISSUED",
+                "credentials": [],
+            });
+            body.as_object_mut().unwrap().remove(missing);
+            assert!(
+                serde_json::from_value::<CredentialMessage>(body).is_err(),
+                "expected deserialization to fail with '{missing}' missing"
+            );
+        }
     }
 
     #[test]

@@ -6,6 +6,7 @@ pub mod auth;
 pub mod config;
 mod handlers;
 pub mod state;
+pub mod validation;
 
 use std::sync::Arc;
 
