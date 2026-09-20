@@ -50,6 +50,27 @@ pub struct Config {
     /// local/test environments only. `base.protocol.md` mandates HTTPS for
     /// a real deployment's base URL.
     pub insecure_http: bool,
+    /// Allow-list of caller DIDs trusted to deliver a `CredentialMessage`
+    /// (Storage API) or `CredentialOfferMessage` (Credential Offer API) to
+    /// this Credential Service - the DCP spec's own "Verify Trust" step,
+    /// distinct from (and enforced after) `verify_bearer_token`'s signature/
+    /// envelope checks, which only prove a token's `iss` really signed it,
+    /// not that this service has any reason to trust that `iss` as *the*
+    /// issuer. Empty means no restriction is configured - this bootstrap's
+    /// permissive default (see `crate::handlers::storage_write`'s doc
+    /// comment and `../../ARCHITECTURE.md`'s "What's simplified or
+    /// stubbed"), not a claim that an empty list is a safe default for a
+    /// real deployment. A small explicit list is sufficient for this
+    /// bootstrap's scope rather than a full trust-registry integration.
+    ///
+    /// Wired to the real `eclipse-dataspacetck/dcp-tck`'s own SUT
+    /// convention for exactly this signal: `dataspacetck.did.issuer`
+    /// (`BaseAssembly::parseDid`/`getIssuerDid`, decompiled from
+    /// `eclipsedataspacetck/dcp-tck-runtime:latest` to confirm, not
+    /// guessed) - see `tests/dcp.tck.properties`, which pins it explicitly,
+    /// and `tests/dcp_tck.rs`, which passes the identical value here via
+    /// [`Config::with_trusted_issuer_dids`].
+    pub trusted_issuer_dids: Vec<String>,
 }
 
 impl Config {
@@ -73,6 +94,15 @@ impl Config {
             sts_client_secret: "tck-secret".to_string(),
             scope_pattern: DEFAULT_SCOPE_PATTERN.to_string(),
             insecure_http: true,
+            trusted_issuer_dids: Vec::new(),
         }
+    }
+
+    /// Builder-style setter for [`trusted_issuer_dids`](Self::trusted_issuer_dids),
+    /// so the common case (`for_test`'s permissive empty default) doesn't
+    /// need every call site updated just to opt in.
+    pub fn with_trusted_issuer_dids(mut self, trusted_issuer_dids: Vec<String>) -> Self {
+        self.trusted_issuer_dids = trusted_issuer_dids;
+        self
     }
 }

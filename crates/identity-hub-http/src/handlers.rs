@@ -19,7 +19,7 @@ use identity_hub_core::messages::{
 use identity_hub_core::store::StoredCredentialBatch;
 use identity_hub_core::sts::{self, StsTokenRequest};
 
-use crate::auth::{AuthError, verify_bearer_token};
+use crate::auth::{AuthError, check_trusted_issuer, verify_bearer_token};
 use crate::config::Mode;
 use crate::state::{AppState, RequestRecord};
 
@@ -274,15 +274,20 @@ fn build_presentation(
 /// Credential-Service setup phase carries exactly such a token on every one
 /// of its legitimate Storage API calls - see `../../ARCHITECTURE.md`'s
 /// "What's simplified or stubbed" for how this was checked. `iss == sub`,
-/// `nbf`, `capabilityInvocation`, and `jti` replay are all real checks now
-/// too; the nested `token` claim's own validity/scope and `iat` are not -
-/// see the same section for exactly what remains and why.
+/// `nbf`, `iat`, `capabilityInvocation`, and `jti` replay are all real
+/// checks now too. On top of that envelope validation, the caller's `iss`
+/// must also be on `state.config.trusted_issuer_dids`
+/// (`crate::auth::check_trusted_issuer`) when that list is non-empty - a
+/// genuinely valid, correctly self-signed token from an unrelated but
+/// otherwise-legitimate DID is still not this service's issuer. The nested
+/// `token` claim's own signature/binding is not checked here - see the same
+/// section for exactly what remains and why.
 async fn storage_write(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     Json(message): Json<CredentialMessage>,
 ) -> Response {
-    if let Err(err) = verify_bearer_token(
+    let claims = match verify_bearer_token(
         &state.http,
         bearer_header(&headers),
         state.identity.own_did(),
@@ -291,6 +296,10 @@ async fn storage_write(
     )
     .await
     {
+        Ok(claims) => claims,
+        Err(err) => return auth_error_response(err),
+    };
+    if let Err(err) = check_trusted_issuer(&claims, &state.config.trusted_issuer_dids) {
         return auth_error_response(err);
     }
     state.store.store(StoredCredentialBatch {
@@ -313,13 +322,14 @@ async fn storage_write(
 /// `../../ARCHITECTURE.md`, "Provenance: Contreforts") but does not yet
 /// trigger a holder-driven follow-up request - see `../../ARCHITECTURE.md`.
 /// Requires a valid Self-Issued ID Token addressed to this service, the
-/// same way `storage_write` does now (see that handler's doc comment).
+/// same way `storage_write` does now (see that handler's doc comment,
+/// including the trusted-issuer allow-list check).
 async fn credential_offer(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     Json(message): Json<CredentialOfferMessage>,
 ) -> Response {
-    if let Err(err) = verify_bearer_token(
+    let claims = match verify_bearer_token(
         &state.http,
         bearer_header(&headers),
         state.identity.own_did(),
@@ -328,6 +338,10 @@ async fn credential_offer(
     )
     .await
     {
+        Ok(claims) => claims,
+        Err(err) => return auth_error_response(err),
+    };
+    if let Err(err) = check_trusted_issuer(&claims, &state.config.trusted_issuer_dids) {
         return auth_error_response(err);
     }
     let offer_id = state

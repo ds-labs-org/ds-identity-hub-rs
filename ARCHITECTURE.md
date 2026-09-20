@@ -3,7 +3,7 @@
 **Status:** Bootstrap, working end to end against the real TCK (see "DCP TCK
 conformance snapshot" below). Not yet integrated with a live dataspace
 control plane, a real key-management/HSM backend, or a persistent store.
-**Date:** 2026-09-20 (five changes today: real per-request authorization
+**Date:** 2026-09-20 (six changes today: real per-request authorization
 added to the Storage API and Credential Offer API; then `verify_bearer_token`
 gained `iss == sub`, `nbf`, `capabilityInvocation`, and `jti`-replay checks;
 then the Presentation API gained scope-escalation enforcement against the
@@ -11,10 +11,11 @@ caller's own nested access-token grant; then, separately from TCK
 conformance, the Storage API's credential store and the Credential Offer
 API's accepted-offer record were rebuilt on a Contreforts-backed semantic
 RDF graph — see "Provenance: Contreforts"; then `verify_bearer_token`
-additionally rejects an `iat` (issued-at) claim in the future; see "What's
-simplified or stubbed" and "DCP TCK conformance snapshot" below — 36 -> 22
--> 12 -> 11 -> 9 real TCK failures, each step TDD'd and re-measured, not
-assumed)
+additionally rejects an `iat` (issued-at) claim in the future; then the
+Storage API and Credential Offer API gained a trusted-issuer allow-list
+check (`Config::trusted_issuer_dids`); see "What's simplified or stubbed"
+and "DCP TCK conformance snapshot" below — 36 -> 22 -> 12 -> 11 -> 9 -> 8
+real TCK failures, each step TDD'd and re-measured, not assumed)
 
 This file records the scope and design decisions behind this project's
 bootstrap, why each was made, and an honest accounting of what actually
@@ -482,15 +483,40 @@ including the first (wrong) fixes tried along the way).
   signature verification plus an iss/sub binding check back to the outer
   envelope's caller — a larger, separate piece of work than the scope
   check above, out of this bootstrap's scope for today.
-- **No "trusted issuer" allow-list check.** `verify_bearer_token` accepts
-  any `iss` whose `did:web` document resolves and whose key verifies the
-  token's signature (and, as of today, whose key is capability-listed) —
-  there's no separate check that the issuing party is a *known/trusted*
-  issuer (the DCP spec's own "Verify Trust" step, above and beyond
-  signature verification). Invisible before the first 2026-09-20 change
-  (the Storage API accepted everything regardless of `iss`); now a real,
-  distinct, TCK-caught gap, unchanged by today's second, third and fourth
-  changes (`cs_06_05_01_credentialMessage_untrustedIssuer`).
+- **Trusted-issuer allow-list check, added 2026-09-20 (sixth change
+  today).** `verify_bearer_token` accepting any `iss` whose `did:web`
+  document resolves and whose key verifies the token's signature (and is
+  capability-listed) is signature verification, not trust — the DCP spec's
+  own separate "Verify Trust" step needs a check that the issuing party is
+  actually a *known* issuer, which was missing until now. Investigated by
+  decompiling the real TCK's own `CredentialIssuanceTest`/
+  `AbstractCredentialIssuanceTest`/`BaseAssembly`
+  (`eclipsedataspacetck/dcp-tck-runtime:latest`), not guessed from the test
+  name: `cs_06_05_01_credentialMessage_untrustedIssuer` signs a genuinely
+  valid outer envelope (`iss == sub == thirdPartyDid`, a real, resolvable
+  `did:web` with its own real `capabilityInvocation`) and still expects a
+  `4xx`, purely because `thirdPartyDid` isn't the DID the TCK's own SUT
+  configuration convention already names as "the issuer"
+  (`dataspacetck.did.issuer`, `BaseAssembly::parseDid`/`getIssuerDid`). Fixed
+  by adding `Config::trusted_issuer_dids` (an explicit allow-list of caller
+  DIDs; empty means no restriction, this bootstrap's permissive default) and
+  a new `auth::check_trusted_issuer`, called by `storage_write` and
+  `credential_offer` right after `verify_bearer_token`'s envelope checks
+  pass — deliberately *not* folded into `verify_bearer_token` itself, since
+  that function is shared by the Presentation API and the Issuer Service's
+  Credential Request API too, whose legitimate callers are holders/verifiers
+  rather than "the issuer", so one allow-list can't apply to all of them.
+  `tests/dcp.tck.properties` now pins `dataspacetck.did.issuer` explicitly
+  (matching the value `BaseAssembly` would derive anyway, for a documented,
+  predictable pin rather than an implicit default) and `tests/dcp_tck.rs`
+  wires the identical value into `Config::trusted_issuer_dids`. TDD'd:
+  `tests/trusted_issuer_allowlist.rs` asserts an untrusted-but-otherwise-
+  valid caller is rejected and a trusted one is accepted, for both
+  endpoints, red-then-green, against the real HTTP layer with no TCK/Docker
+  dependency. Real, measured effect: closed exactly
+  `cs_06_05_01_credentialMessage_untrustedIssuer` (9 -> 8), confirmed
+  against the real TCK, reproduced identically twice, with zero regressions
+  on the other 45 tests.
 - **`iat` (issued-at) in the future check, added 2026-09-20 (fourth change
   today).** `verify_bearer_token` (`identity-hub-http/src/auth.rs`) now
   also rejects a token whose `iat` claim is in the future, using the same
@@ -577,18 +603,19 @@ including the first (wrong) fixes tried along the way).
 ## DCP TCK conformance snapshot
 
 **Run against a real, locally running `eclipsedataspacetck/dcp-tck-runtime:latest`
-container — 2026-09-20**, after four changes today: adding real
+container — 2026-09-20**, after five changes today: adding real
 per-request authorization to the Storage API and Credential Offer API;
 adding the `iss == sub`/`nbf`/`capabilityInvocation`/`jti`-replay checks to
 `verify_bearer_token`; adding scope-escalation enforcement to
 `presentation_query` against the caller's own nested access-token grant;
-then adding an `iat`-in-the-future check to `verify_bearer_token` (see
-"What's simplified or stubbed" for all four). Not fabricated:
+adding an `iat`-in-the-future check to `verify_bearer_token`; then adding a
+trusted-issuer allow-list check to the Storage API and Credential Offer API
+(see "What's simplified or stubbed" for all five). Not fabricated:
 `tests/dcp_tck.rs` boots this crate's real Credential Service in-process
 and drives the actual, official TCK container against it via
 `testcontainers`, exactly as it runs in CI. Reproduced identically twice
-with a 9-failure set immediately after the fourth change (and the prior
-11-failure result was itself reproduced twice before that change, per the
+with an 8-failure set immediately after the fifth change (and the prior
+9-failure result was itself reproduced twice before that change, per the
 previous snapshot) before being written down here.
 
 Scoped to the Credential Service test packages
@@ -598,26 +625,26 @@ Scoped to the Credential Service test packages
 | Test package | Total | Passed | Failed |
 |---|---:|---:|---:|
 | `presentation.cs` (VPP) | 23 | 21 | 2 |
-| `issuance.cs` (CIP) | 31 | 24 | 7 |
-| **Total** | **54** | **45** | **9** |
+| `issuance.cs` (CIP) | 31 | 25 | 6 |
+| **Total** | **54** | **46** | **8** |
 
-(`issuance.cs` gained 2 passes this change —
-`cs_06_05_01_credentialMessage_iatInFuture` and
-`cs_06_06_01_credentialOfferMessage_iatInFuture`; `presentation.cs` is
-unchanged, since the TCK only probes `iat` on the Storage/Offer APIs, both
-`issuance.cs`. Re-derived directly from the TCK's own stack traces, which
-name the failing test's class and package unambiguously.)
+(`issuance.cs` gained 1 pass this change —
+`cs_06_05_01_credentialMessage_untrustedIssuer`; `presentation.cs` is
+unchanged, since the TCK only probes the trusted-issuer allow-list on the
+Storage API, part of `issuance.cs`. Re-derived directly from the TCK's own
+stack traces, which name the failing test's class and package
+unambiguously.)
 
-`tests/dcp_tck.rs`'s `EXPECTED_FAILURES` asserts the **exact** set of 9
+`tests/dcp_tck.rs`'s `EXPECTED_FAILURES` asserts the **exact** set of 8
 failing test method names (not just the count) — a regression on any of the
-45 currently-passing tests, or any new/different failure, fails that test;
-so does the TCK reporting fewer than 9 failures without a matching update
-here (a sign the claims above have gone stale). The 9 fall into three
+46 currently-passing tests, or any new/different failure, fails that test;
+so does the TCK reporting fewer than 8 failures without a matching update
+here (a sign the claims above have gone stale). The 8 fall into two
 categories, matching "What's simplified or stubbed" above (see
 `EXPECTED_FAILURES`'s own comments for the full per-category test list and
 the reasoning, drawn from reading the real TCK's own source):
 
-1. **No nested-access-token authentication (2 of 9)** —
+1. **No nested-access-token authentication (2 of 8)** —
    `cs_04_03_03_idTokenInvalidIssuerSub`, `cs_05_04_invalidTokenNotAuthorized`:
    the nested `token` claim (the actual Verifiable-Presentation access
    token) has its `scope` claim read and enforced (closing
@@ -633,45 +660,40 @@ the reasoning, drawn from reading the real TCK's own source):
    token, `"faketoken"`, isn't a JWS at all - this bootstrap's scope check
    simply can't decode it and falls back to no restriction, rather than
    rejecting the request).
-2. **No "trusted issuer" allow-list check (1 of 9)** —
-   `cs_06_05_01_credentialMessage_untrustedIssuer`: `verify_bearer_token`
-   accepts any `iss` whose `did:web` resolves, whose signature verifies,
-   and whose key is capability-listed — but that document itself is never
-   checked against a known/trusted-issuer list, a distinct step from
-   signature verification. Unchanged by today's changes.
-3. **Message-content/business-logic validation, unrelated to the token
-   wrapper (6 of 9)** — a schema/enum-invalid `CredentialMessage` body, an
+2. **Message-content/business-logic validation, unrelated to the token
+   wrapper (6 of 8)** — a schema/enum-invalid `CredentialMessage` body, an
    invalid `status` value, an unverifiable embedded credential proof, an
    unknown `holderPid`, an empty `CredentialOfferMessage.credentials`
    array, and offered credential ids that don't match a known catalog. All
-   six present a genuinely valid Self-Issued ID Token (now checked against
-   `iss == sub`/`aud`/`exp`/`nbf`/`iat`/`capabilityInvocation`/
-   `jti`-replay); this bootstrap simply doesn't validate the message body
+   six present a genuinely valid, genuinely *trusted* Self-Issued ID Token
+   (now checked against `iss == sub`/`aud`/`exp`/`nbf`/`iat`/
+   `capabilityInvocation`/`jti`-replay, and against the trusted-issuer
+   allow-list); this bootstrap simply doesn't validate the message body
    itself yet.
 
-**What changed from the previous (11-failure) snapshot:** exactly two
-tests moved from failing to passing -
-`cs_06_05_01_credentialMessage_iatInFuture` and
-`cs_06_06_01_credentialOfferMessage_iatInFuture`, both closed by adding an
-`iat`-in-the-future check to `verify_bearer_token` (see "What's simplified
-or stubbed"). Nothing regressed: every test that passed before still
-passes (confirmed by the same exact-set assertion, not just a count). The
-previous snapshot's "`iat` in the future is not checked" category is gone
-entirely; the remaining four categories from earlier snapshots collapse to
-three now that it's closed.
+**What changed from the previous (9-failure) snapshot:** exactly one test
+moved from failing to passing - `cs_06_05_01_credentialMessage_untrustedIssuer`,
+closed by adding a trusted-issuer allow-list check to `storage_write` and
+`credential_offer` (see "What's simplified or stubbed"). Nothing regressed:
+every test that passed before still passes (confirmed by the same
+exact-set assertion, not just a count). The previous snapshot's "No
+'trusted issuer' allow-list check" category is gone entirely; the
+remaining three categories from earlier snapshots collapse to two now that
+it's closed.
 
-What's genuinely proven working by the **45 passing tests**: everything the
-previous 43-passing snapshot proved (real `did:web` hosting and
+What's genuinely proven working by the **46 passing tests**: everything the
+previous 45-passing snapshot proved (real `did:web` hosting and
 Credential-Service-endpoint discovery, the Storage/Offer APIs'
 authorization rejections for every *shape*-level token defect, all four
-endpoints' `iss == sub`/`nbf`/`capabilityInvocation`/`jti`-replay checks,
-and the Presentation API's scope-escalation filtering) plus, new in this
-snapshot, all four endpoints genuinely rejecting a Self-Issued ID Token
-whose `iat` claims to have been issued in the future - real, TDD'd, and
-TCK-confirmed, not assumed (see `tests/si_token_validation.rs` for the same
+endpoints' `iss == sub`/`nbf`/`iat`/`capabilityInvocation`/`jti`-replay
+checks, and the Presentation API's scope-escalation filtering) plus, new in
+this snapshot, the Storage API and Credential Offer API genuinely rejecting
+an otherwise-valid Self-Issued ID Token whose issuer isn't on the
+configured trusted-issuer allow-list - real, TDD'd, and TCK-confirmed, not
+assumed (see `tests/trusted_issuer_allowlist.rs` for the same
 assertion made directly against the HTTP layer, without a TCK/Docker
-dependency, alongside a regression guard that an `iat` within the existing
-clock-skew leeway is still accepted).
+dependency, alongside a regression guard that a caller on the allow-list is
+still accepted).
 
 Run it yourself: `cargo test -p identity-hub-http --test dcp_tck --
 --ignored --nocapture` (needs Docker). See `tests/dcp_tck.rs`'s module doc
@@ -681,8 +703,10 @@ coverage of the authorization behavior, see
 `cargo test -p identity-hub-http --test storage_offer_auth` (per-request
 authorization itself), `cargo test -p identity-hub-http --test
 si_token_validation` (the outer-envelope token-content checks, including
-`iat`), and `cargo test -p identity-hub-http --test
-presentation_scope_enforcement` (the scope-escalation check).
+`iat`), `cargo test -p identity-hub-http --test
+presentation_scope_enforcement` (the scope-escalation check), and `cargo
+test -p identity-hub-http --test trusted_issuer_allowlist` (the
+trusted-issuer allow-list check).
 
 ## Continuous integration
 
@@ -744,10 +768,12 @@ ds-identity-hub-rs/
                             Service modes) and the dcp-tck conformance test.
       src/
         config.rs          Mode/Config: which role, bind address, own
-                            did:web host, STS credentials, scope pattern.
+                            did:web host, STS credentials, scope pattern,
+                            trusted-issuer allow-list.
         state.rs           AppState: identity, STS-party identity, store,
                             reqwest client (host.docker.internal override).
-        auth.rs             Self-Issued ID Token validation.
+        auth.rs             Self-Issued ID Token validation, plus the
+                            separate trusted-issuer allow-list check.
         handlers.rs         All HTTP routes for both modes.
         main.rs             CLI: `identity-hub credential-service|issuer-service`;
                             also runs the one-off Contreforts round-trip
@@ -762,6 +788,10 @@ ds-identity-hub-rs/
         presentation_scope_enforcement.rs
                                   Scope-escalation enforcement against the
                                   caller's own granted scope (real HTTP, no
+                                  Docker/TCK needed).
+        trusted_issuer_allowlist.rs
+                                  Trusted-issuer allow-list check on the
+                                  Storage/Offer APIs (real HTTP, no
                                   Docker/TCK needed).
   vendor/
     contreforts-core/      Git submodule (contreforts-ai/contreforts-core),
@@ -800,3 +830,7 @@ embedded in its own `did:web` identity and advertised service endpoint (see
 `--sts-client-id`/`--sts-client-secret` default to `tck-client`/
 `tck-secret`; `--insecure-http` (plain HTTP `did:web` resolution) defaults
 to `true`, matching this bootstrap's local/test-only scope.
+`--trusted-issuer-did` (repeatable) populates `Config::trusted_issuer_dids`
+for a Credential Service's Storage/Offer APIs; omitted, it defaults to
+empty (no restriction configured) - see that field's doc comment for why
+that's this bootstrap's default rather than a recommendation.

@@ -102,12 +102,40 @@ const SERVER_PORT: u16 = 19180;
 /// published to. Must match `tests/dcp.tck.properties`'
 /// `dataspacetck.callback.address`.
 const TCK_CALLBACK_PORT: u16 = 19183;
+/// The TCK's own "issuer" role DID, exactly as `tests/dcp.tck.properties`
+/// pins it (`dataspacetck.did.issuer`) - the DID this test's own Credential
+/// Service is configured to trust, per `Config::trusted_issuer_dids`.
+const TCK_ISSUER_DID: &str = "did:web:host.docker.internal%3A19183:issuer";
 
 /// The exact TCK test method names expected to fail against this
 /// bootstrap, and why. See this file's module doc comment for what
 /// asserting an exact set (rather than "no failures") buys, and
 /// `../../ARCHITECTURE.md`'s "DCP TCK conformance snapshot" for the full,
 /// categorized narrative this list summarizes.
+///
+/// **2026-09-20 update (fifth change today):** `storage_write` and
+/// `credential_offer` (`../src/handlers.rs`) now enforce a trusted-issuer
+/// allow-list (`Config::trusted_issuer_dids`, checked by the new
+/// `crate::auth::check_trusted_issuer` after `verify_bearer_token`'s
+/// envelope checks pass) - a caller whose Self-Issued ID Token is otherwise
+/// perfectly valid (correctly self-signed, `iss == sub`, real
+/// `capabilityInvocation`) is now still rejected if its `iss` isn't on the
+/// configured list. Investigated by decompiling the real TCK's own
+/// `CredentialIssuanceTest`/`AbstractCredentialIssuanceTest`/`BaseAssembly`
+/// (from `eclipsedataspacetck/dcp-tck-runtime:latest`, not guessed from the
+/// test name): `cs_06_05_01_credentialMessage_untrustedIssuer` signs a
+/// genuinely valid outer envelope as `thirdPartyDid` (a real, resolvable
+/// `did:web` with its own real `capabilityInvocation`) and expects a `4xx`
+/// purely because `thirdPartyDid` isn't `this.issuerDid` - the TCK's own SUT
+/// convention for "the issuer this Credential Service should trust"
+/// (`dataspacetck.did.issuer`, `BaseAssembly::parseDid`/`getIssuerDid`),
+/// which `tests/dcp.tck.properties` now pins explicitly and this test wires
+/// into `Config::trusted_issuer_dids` via [`TCK_ISSUER_DID`]. TDD'd in
+/// `tests/trusted_issuer_allowlist.rs` (rejection and acceptance cases for
+/// both endpoints, red-then-green). This closes exactly
+/// `cs_06_05_01_credentialMessage_untrustedIssuer` (9 -> 8), confirmed
+/// against the real TCK, reproduced identically twice, with zero
+/// regressions on the other 45 tests.
 ///
 /// **2026-09-20 update (fourth change today):** `verify_bearer_token`
 /// (`../src/auth.rs`) now also rejects a token whose `iat` (issued-at) claim
@@ -180,14 +208,7 @@ const EXPECTED_FAILURES: &[&str] = &[
     // default), rather than the outright rejection this test expects.
     "cs_04_03_03_idTokenInvalidIssuerSub",
     "cs_05_04_invalidTokenNotAuthorized",
-    // 2. No "trusted issuer" allow-list check - unchanged from the previous
-    // snapshot. `verify_bearer_token` accepts any `iss` whose `did:web`
-    // resolves and whose key verifies the signature (and, as of today, is
-    // listed under that same document's own `capabilityInvocation` - but
-    // that document itself is never checked against a known/trusted-issuer
-    // list, a distinct step from signature verification).
-    "cs_06_05_01_credentialMessage_untrustedIssuer",
-    // 3. Message-content/business-logic validation this bootstrap does not
+    // 2. Message-content/business-logic validation this bootstrap does not
     // implement, unrelated to the wrapping Self-Issued ID Token (a
     // genuinely valid token, now checked against `iss == sub`/`aud`/`exp`/
     // `nbf`/`iat`/`capabilityInvocation`/`jti`-replay too, is presented in
@@ -218,7 +239,8 @@ async fn dcp_tck_matches_documented_credential_service_scope() {
         Mode::CredentialService,
         SocketAddr::from(([0, 0, 0, 0], SERVER_PORT)),
         format!("host.docker.internal:{SERVER_PORT}"),
-    );
+    )
+    .with_trusted_issuer_dids(vec![TCK_ISSUER_DID.to_string()]);
     let (_state, router) = identity_hub_http::build(config.clone());
     tokio::spawn(async move {
         let _ = identity_hub_http::serve(&config, router).await;

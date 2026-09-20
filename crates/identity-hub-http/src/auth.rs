@@ -5,11 +5,13 @@
 //! signing key is actually authorized to invoke a capability
 //! (`capabilityInvocation`), then check `iss == sub`, `aud`, `exp`, `nbf`,
 //! `iat` (not in the future), and `jti` replay. Every one of these is now
-//! real - see
-//! `../../ARCHITECTURE.md`'s "DCP TCK conformance snapshot" for exactly
-//! which TCK-caught gaps this closed and which (a trusted-issuer allow-list,
-//! scope-escalation enforcement, message-content validation) remain out of
-//! this bootstrap's scope.
+//! real. [`check_trusted_issuer`] is a separate, later step (DCP's own
+//! "Verify Trust") that endpoints expecting one specific counterparty (the
+//! Storage/Credential Offer APIs) call afterwards - see its own doc comment
+//! and `../../ARCHITECTURE.md`'s "DCP TCK conformance snapshot" for exactly
+//! which TCK-caught gaps this closed and which (nested-access-token
+//! authentication, message-content validation) remain out of this
+//! bootstrap's scope.
 
 use std::collections::HashSet;
 use std::sync::Mutex;
@@ -50,6 +52,8 @@ pub enum AuthError {
     KeyNotAuthorizedForInvocation(String),
     #[error("token jti has already been used (replay)")]
     TokenReplayed,
+    #[error("issuer '{0}' is not on this service's trusted-issuer allow-list")]
+    UntrustedIssuer(String),
 }
 
 /// Extracts a Self-Issued ID Token from an `Authorization: Bearer <jwt>`
@@ -142,4 +146,27 @@ pub async fn verify_bearer_token(
     }
 
     Ok(payload)
+}
+
+/// The DCP spec's own "Verify Trust" step: distinct from, and applied after,
+/// `verify_bearer_token`'s signature/envelope checks, which only prove a
+/// token's `iss` really signed it - not that this service has any reason to
+/// treat that `iss` as *the* issuer it expects to hear from on an endpoint
+/// like the Storage API or Credential Offer API. `trusted_issuer_dids` empty
+/// means no restriction is configured (this bootstrap's permissive default -
+/// see `Config::trusted_issuer_dids`'s doc comment); non-empty, `claims`'
+/// `iss` must be one of them.
+pub fn check_trusted_issuer(
+    claims: &Value,
+    trusted_issuer_dids: &[String],
+) -> Result<(), AuthError> {
+    if trusted_issuer_dids.is_empty() {
+        return Ok(());
+    }
+    let iss = claims.get("iss").and_then(Value::as_str).unwrap_or("");
+    if trusted_issuer_dids.iter().any(|trusted| trusted == iss) {
+        Ok(())
+    } else {
+        Err(AuthError::UntrustedIssuer(iss.to_string()))
+    }
 }

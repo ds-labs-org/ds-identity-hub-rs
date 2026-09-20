@@ -47,6 +47,13 @@ struct CommonArgs {
     /// local/test environments only.
     #[arg(long, default_value_t = true)]
     insecure_http: bool,
+    /// A DID trusted to deliver a `CredentialMessage`/`CredentialOfferMessage`
+    /// to this Credential Service (may be repeated). Empty (the default)
+    /// means no restriction is configured - see `Config::trusted_issuer_dids`'s
+    /// doc comment for why that's this bootstrap's default, not a
+    /// recommendation for a real deployment.
+    #[arg(long = "trusted-issuer-did")]
+    trusted_issuer_dids: Vec<String>,
 }
 
 impl CommonArgs {
@@ -62,6 +69,7 @@ impl CommonArgs {
             sts_client_secret: self.sts_client_secret,
             scope_pattern: self.scope_pattern,
             insecure_http: self.insecure_http,
+            trusted_issuer_dids: self.trusted_issuer_dids,
         }
     }
 }
