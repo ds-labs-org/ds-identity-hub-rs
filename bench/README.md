@@ -109,11 +109,30 @@ Ports: 9080 base, 9081 identity API, 9082 credentials/presentation API
 
 ```
 cargo run --release -p identity-hub-http --bin identity-hub -- \
-  credential-service --bind 0.0.0.0:18080 --did-host 127.0.0.1:18080
+  credential-service --bind 0.0.0.0:18080 --did-host 127.0.0.1:18080 \
+  --trusted-issuer-did did:web:127.0.0.1%3A18080:sts-party
 ```
 
 Its Presentation API is `POST /presentations/query`; its own embedded STS is
 `POST /sts/token` (default client id/secret `tck-client`/`tck-secret`).
+
+**The `--trusted-issuer-did` flag is required as of the 2026-09-20 security
+hardening** (see `../ARCHITECTURE.md`'s "What's simplified or stubbed",
+change 11): an empty `--trusted-issuer-did` list now means the Storage API
+(`POST /credentials`) and Credential Offer API (`POST /offers`) reject
+*every* write with `401`, not "no restriction" as before. `verifier-token`'s
+own seed call (below) authenticates itself with a token minted by the
+target's own embedded STS, so the DID that must be trusted is the target's
+own STS-party identity, deterministically
+`did:web:127.0.0.1%3A<bind port>:sts-party`
+(`crates/identity-hub-http/src/state.rs::AppState::new`) - `bench-rust.sh`
+computes this itself as `STS_PARTY_DID`. Outbound request confinement (the
+same hardening's change 10) needs no corresponding flag for this bench
+setup: `verifier-token` hosts its own `did:web` documents on `127.0.0.1`,
+which `identity_hub_http::outbound::OutboundPolicy` already allow-lists
+unconditionally - verified empirically with a manual boot+seed+mint+query
+smoke test before relying on it (see the post-hardening benchmark report in
+`dataspace/docs/benchmarks/` for that trace).
 
 ### Why a whole extra process (`bench/verifier-token/`), not just a curl one-liner
 

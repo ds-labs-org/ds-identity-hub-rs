@@ -14,42 +14,42 @@
               * presentation_query: 5 looping VUs for 10s (gracefulStop: 30s)
 
 
-running (01.0s), 5/5 VUs, 2839 complete and 0 interrupted iterations
+running (01.0s), 5/5 VUs, 2571 complete and 0 interrupted iterations
 presentation_query   [  10% ] 5 VUs  01.0s/10s
 
-running (02.0s), 5/5 VUs, 5405 complete and 0 interrupted iterations
+running (02.0s), 5/5 VUs, 5013 complete and 0 interrupted iterations
 presentation_query   [  20% ] 5 VUs  02.0s/10s
 
-running (03.0s), 5/5 VUs, 7923 complete and 0 interrupted iterations
+running (03.0s), 5/5 VUs, 7506 complete and 0 interrupted iterations
 presentation_query   [  30% ] 5 VUs  03.0s/10s
 
-running (04.0s), 5/5 VUs, 10446 complete and 0 interrupted iterations
+running (04.0s), 5/5 VUs, 10030 complete and 0 interrupted iterations
 presentation_query   [  40% ] 5 VUs  04.0s/10s
 
-running (05.0s), 5/5 VUs, 12991 complete and 0 interrupted iterations
+running (05.0s), 5/5 VUs, 12575 complete and 0 interrupted iterations
 presentation_query   [  50% ] 5 VUs  05.0s/10s
 
-running (06.0s), 5/5 VUs, 15435 complete and 0 interrupted iterations
+running (06.0s), 5/5 VUs, 15046 complete and 0 interrupted iterations
 presentation_query   [  60% ] 5 VUs  06.0s/10s
 
-running (07.0s), 5/5 VUs, 17926 complete and 0 interrupted iterations
+running (07.0s), 5/5 VUs, 17548 complete and 0 interrupted iterations
 presentation_query   [  70% ] 5 VUs  07.0s/10s
 
-running (08.0s), 5/5 VUs, 20399 complete and 0 interrupted iterations
+running (08.0s), 5/5 VUs, 20063 complete and 0 interrupted iterations
 presentation_query   [  80% ] 5 VUs  08.0s/10s
 
-running (09.0s), 5/5 VUs, 22816 complete and 0 interrupted iterations
+running (09.0s), 5/5 VUs, 22564 complete and 0 interrupted iterations
 presentation_query   [  90% ] 5 VUs  09.0s/10s
 
-running (10.0s), 5/5 VUs, 25244 complete and 0 interrupted iterations
+running (10.0s), 5/5 VUs, 25024 complete and 0 interrupted iterations
 presentation_query   [ 100% ] 5 VUs  10.0s/10s
 
 
   █ THRESHOLDS 
 
     http_req_duration
-    ✓ 'p(95)<5000' p(95)=2.87ms
-    ✓ 'p(99)<5000' p(99)=3.18ms
+    ✓ 'p(95)<5000' p(95)=2.88ms
+    ✓ 'p(99)<5000' p(99)=3.17ms
 
     http_req_failed
     ✓ 'rate<0.01' rate=0.00%
@@ -57,30 +57,30 @@ presentation_query   [ 100% ] 5 VUs  10.0s/10s
 
   █ TOTAL RESULTS 
 
-    checks_total.......: 25252   2524.554819/s
-    checks_succeeded...: 100.00% 25252 out of 25252
-    checks_failed......: 0.00%   0 out of 25252
+    checks_total.......: 25032   2502.780437/s
+    checks_succeeded...: 100.00% 25032 out of 25032
+    checks_failed......: 0.00%   0 out of 25032
 
     ✓ status is 200
 
     HTTP
-    http_req_duration..............: avg=1.9ms  min=787.19µs med=1.85ms max=5.93ms p(90)=2.63ms p(95)=2.87ms
-      { expected_response:true }...: avg=1.9ms  min=787.19µs med=1.85ms max=5.93ms p(90)=2.63ms p(95)=2.87ms
-    http_req_failed................: 0.00% 0 out of 25252
-    http_reqs......................: 25252 2524.554819/s
+    http_req_duration..............: avg=1.91ms min=776.63µs med=1.86ms max=6.67ms p(90)=2.65ms p(95)=2.88ms
+      { expected_response:true }...: avg=1.91ms min=776.63µs med=1.86ms max=6.67ms p(90)=2.65ms p(95)=2.88ms
+    http_req_failed................: 0.00% 0 out of 25032
+    http_reqs......................: 25032 2502.780437/s
 
     EXECUTION
-    iteration_duration.............: avg=1.97ms min=827.99µs med=1.93ms max=6ms    p(90)=2.71ms p(95)=2.95ms
-    iterations.....................: 25252 2524.554819/s
+    iteration_duration.............: avg=1.99ms min=822.13µs med=1.94ms max=6.8ms  p(90)=2.73ms p(95)=2.96ms
+    iterations.....................: 25032 2502.780437/s
     vus............................: 5     min=5          max=5
     vus_max........................: 5     min=5          max=5
 
     NETWORK
-    data_received..................: 46 MB 4.6 MB/s
+    data_received..................: 45 MB 4.5 MB/s
     data_sent......................: 39 MB 3.9 MB/s
 
 
 
 
-running (10.0s), 0/5 VUs, 25252 complete and 0 interrupted iterations
+running (10.0s), 0/5 VUs, 25032 complete and 0 interrupted iterations
 presentation_query ✓ [ 100% ] 5 VUs  10s

@@ -32,6 +32,24 @@ SCOPE="org.eclipse.dspace.dcp.vc.type:MembershipCredential"
 TARGET_DID="did:web:127.0.0.1%3A${RUST_PORT}:credential-service"
 TARGET_BASE_URL="http://127.0.0.1:${RUST_PORT}"
 PRESENTATION_URL="${TARGET_BASE_URL}/presentations/query"
+# 2026-09-20 post-hardening addition: `AppState::new` derives this process's
+# own STS-party identity as `did:web:127.0.0.1%3A<bind port>:sts-party`
+# (`crates/identity-hub-http/src/state.rs`) - deterministic from RUST_PORT
+# alone, so this is computed rather than discovered. verifier-token's own
+# `seed_credential` authenticates its Storage API seed call with a token
+# minted by the target's OWN embedded STS (audience = the target's own DID),
+# so that token's `iss`/`sub` is this STS-party DID - the caller the
+# now-deny-by-default Storage API (see ARCHITECTURE.md's "What's simplified
+# or stubbed", change 11) must be told to trust, or seeding gets a 401
+# `NoTrustedIssuerConfigured` instead of 200. Verified empirically with a
+# small manual boot+seed+mint+query smoke test before wiring this in - see
+# the post-hardening benchmark report for that trace. Outbound request
+# confinement (change 10) needed NO corresponding flag here: verifier-token
+# hosts its own did:web documents on 127.0.0.1, which
+# `identity_hub_http::outbound::OutboundPolicy` already allow-lists
+# unconditionally (see its own module doc comment) - `--allow-resolve-host`
+# is not needed for this bench setup.
+STS_PARTY_DID="did:web:127.0.0.1%3A${RUST_PORT}:sts-party"
 
 VUS="${VUS:-20}"
 DURATION="${DURATION:-30s}"
@@ -55,6 +73,7 @@ echo "Building release binaries (no-op if already built) ..."
 echo "Starting ds-identity-hub-rs Credential Service on :${RUST_PORT} ..."
 nohup "$REPO_ROOT/target/release/identity-hub" credential-service \
   --bind "0.0.0.0:${RUST_PORT}" --did-host "127.0.0.1:${RUST_PORT}" \
+  --trusted-issuer-did "$STS_PARTY_DID" \
   > "$RESULTS_DIR/service.log" 2>&1 &
 for _ in $(seq 1 60); do
   ss -tln 2>/dev/null | grep -q ":${RUST_PORT} " && break

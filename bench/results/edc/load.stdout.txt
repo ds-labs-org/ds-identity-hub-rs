@@ -14,102 +14,102 @@
               * presentation_query: 20 looping VUs for 30s (gracefulStop: 30s)
 
 
-running (0m01.0s), 20/20 VUs, 3009 complete and 0 interrupted iterations
+running (0m01.0s), 20/20 VUs, 3226 complete and 0 interrupted iterations
 presentation_query   [   3% ] 20 VUs  01.0s/30s
 
-running (0m02.0s), 20/20 VUs, 5936 complete and 0 interrupted iterations
+running (0m02.0s), 20/20 VUs, 6277 complete and 0 interrupted iterations
 presentation_query   [   7% ] 20 VUs  02.0s/30s
 
-running (0m03.0s), 20/20 VUs, 8921 complete and 0 interrupted iterations
+running (0m03.0s), 20/20 VUs, 9188 complete and 0 interrupted iterations
 presentation_query   [  10% ] 20 VUs  03.0s/30s
 
-running (0m04.0s), 20/20 VUs, 11791 complete and 0 interrupted iterations
+running (0m04.0s), 20/20 VUs, 12326 complete and 0 interrupted iterations
 presentation_query   [  13% ] 20 VUs  04.0s/30s
 
-running (0m05.0s), 20/20 VUs, 14646 complete and 0 interrupted iterations
+running (0m05.0s), 20/20 VUs, 15280 complete and 0 interrupted iterations
 presentation_query   [  17% ] 20 VUs  05.0s/30s
 
-running (0m06.0s), 20/20 VUs, 17480 complete and 0 interrupted iterations
+running (0m06.0s), 20/20 VUs, 18207 complete and 0 interrupted iterations
 presentation_query   [  20% ] 20 VUs  06.0s/30s
 
-running (0m07.0s), 20/20 VUs, 20351 complete and 0 interrupted iterations
+running (0m07.0s), 20/20 VUs, 21036 complete and 0 interrupted iterations
 presentation_query   [  23% ] 20 VUs  07.0s/30s
 
-running (0m08.0s), 20/20 VUs, 23169 complete and 0 interrupted iterations
+running (0m08.0s), 20/20 VUs, 24105 complete and 0 interrupted iterations
 presentation_query   [  27% ] 20 VUs  08.0s/30s
 
-running (0m09.0s), 20/20 VUs, 26088 complete and 0 interrupted iterations
+running (0m09.0s), 20/20 VUs, 26979 complete and 0 interrupted iterations
 presentation_query   [  30% ] 20 VUs  09.0s/30s
 
-running (0m10.0s), 20/20 VUs, 28953 complete and 0 interrupted iterations
+running (0m10.0s), 20/20 VUs, 29877 complete and 0 interrupted iterations
 presentation_query   [  33% ] 20 VUs  10.0s/30s
 
-running (0m11.0s), 20/20 VUs, 31777 complete and 0 interrupted iterations
+running (0m11.0s), 20/20 VUs, 32941 complete and 0 interrupted iterations
 presentation_query   [  37% ] 20 VUs  11.0s/30s
 
-running (0m12.0s), 20/20 VUs, 34627 complete and 0 interrupted iterations
+running (0m12.0s), 20/20 VUs, 35754 complete and 0 interrupted iterations
 presentation_query   [  40% ] 20 VUs  12.0s/30s
 
-running (0m13.0s), 20/20 VUs, 37459 complete and 0 interrupted iterations
+running (0m13.0s), 20/20 VUs, 38583 complete and 0 interrupted iterations
 presentation_query   [  43% ] 20 VUs  13.0s/30s
 
-running (0m14.0s), 20/20 VUs, 40384 complete and 0 interrupted iterations
+running (0m14.0s), 20/20 VUs, 41448 complete and 0 interrupted iterations
 presentation_query   [  47% ] 20 VUs  14.0s/30s
 
-running (0m15.0s), 20/20 VUs, 43248 complete and 0 interrupted iterations
+running (0m15.0s), 20/20 VUs, 44410 complete and 0 interrupted iterations
 presentation_query   [  50% ] 20 VUs  15.0s/30s
 
-running (0m16.0s), 20/20 VUs, 46098 complete and 0 interrupted iterations
+running (0m16.0s), 20/20 VUs, 47157 complete and 0 interrupted iterations
 presentation_query   [  53% ] 20 VUs  16.0s/30s
 
-running (0m17.0s), 20/20 VUs, 48919 complete and 0 interrupted iterations
+running (0m17.0s), 20/20 VUs, 49977 complete and 0 interrupted iterations
 presentation_query   [  57% ] 20 VUs  17.0s/30s
 
-running (0m18.0s), 20/20 VUs, 51705 complete and 0 interrupted iterations
+running (0m18.0s), 20/20 VUs, 52947 complete and 0 interrupted iterations
 presentation_query   [  60% ] 20 VUs  18.0s/30s
 
-running (0m19.0s), 20/20 VUs, 54474 complete and 0 interrupted iterations
+running (0m19.0s), 20/20 VUs, 55638 complete and 0 interrupted iterations
 presentation_query   [  63% ] 20 VUs  19.0s/30s
 
-running (0m20.0s), 20/20 VUs, 57246 complete and 0 interrupted iterations
+running (0m20.0s), 20/20 VUs, 58234 complete and 0 interrupted iterations
 presentation_query   [  67% ] 20 VUs  20.0s/30s
 
-running (0m21.0s), 20/20 VUs, 59984 complete and 0 interrupted iterations
+running (0m21.0s), 20/20 VUs, 60987 complete and 0 interrupted iterations
 presentation_query   [  70% ] 20 VUs  21.0s/30s
 
-running (0m22.0s), 20/20 VUs, 62701 complete and 0 interrupted iterations
+running (0m22.0s), 20/20 VUs, 63757 complete and 0 interrupted iterations
 presentation_query   [  73% ] 20 VUs  22.0s/30s
 
-running (0m23.0s), 20/20 VUs, 65447 complete and 0 interrupted iterations
+running (0m23.0s), 20/20 VUs, 66459 complete and 0 interrupted iterations
 presentation_query   [  77% ] 20 VUs  23.0s/30s
 
-running (0m24.0s), 20/20 VUs, 68105 complete and 0 interrupted iterations
+running (0m24.0s), 20/20 VUs, 68711 complete and 0 interrupted iterations
 presentation_query   [  80% ] 20 VUs  24.0s/30s
 
-running (0m25.0s), 20/20 VUs, 70826 complete and 0 interrupted iterations
+running (0m25.0s), 20/20 VUs, 70953 complete and 0 interrupted iterations
 presentation_query   [  83% ] 20 VUs  25.0s/30s
 
-running (0m26.0s), 20/20 VUs, 73599 complete and 0 interrupted iterations
+running (0m26.0s), 20/20 VUs, 73188 complete and 0 interrupted iterations
 presentation_query   [  87% ] 20 VUs  26.0s/30s
 
-running (0m27.0s), 20/20 VUs, 76282 complete and 0 interrupted iterations
+running (0m27.0s), 20/20 VUs, 75367 complete and 0 interrupted iterations
 presentation_query   [  90% ] 20 VUs  27.0s/30s
 
-running (0m28.0s), 20/20 VUs, 78989 complete and 0 interrupted iterations
+running (0m28.0s), 20/20 VUs, 77594 complete and 0 interrupted iterations
 presentation_query   [  93% ] 20 VUs  28.0s/30s
 
-running (0m29.0s), 20/20 VUs, 81702 complete and 0 interrupted iterations
+running (0m29.0s), 20/20 VUs, 79856 complete and 0 interrupted iterations
 presentation_query   [  97% ] 20 VUs  29.0s/30s
 
-running (0m30.0s), 20/20 VUs, 84494 complete and 0 interrupted iterations
+running (0m30.0s), 20/20 VUs, 82078 complete and 0 interrupted iterations
 presentation_query   [ 100% ] 20 VUs  30.0s/30s
 
 
   █ THRESHOLDS 
 
     http_req_duration
-    ✓ 'p(95)<5000' p(95)=11.16ms
-    ✓ 'p(99)<5000' p(99)=13.25ms
+    ✓ 'p(95)<5000' p(95)=11.97ms
+    ✓ 'p(99)<5000' p(99)=14.55ms
 
     http_req_failed
     ✓ 'rate<0.01' rate=0.00%
@@ -117,30 +117,30 @@ presentation_query   [ 100% ] 20 VUs  30.0s/30s
 
   █ TOTAL RESULTS 
 
-    checks_total.......: 84527   2817.085391/s
-    checks_succeeded...: 100.00% 84527 out of 84527
-    checks_failed......: 0.00%   0 out of 84527
+    checks_total.......: 82104   2736.291157/s
+    checks_succeeded...: 100.00% 82104 out of 82104
+    checks_failed......: 0.00%   0 out of 82104
 
     ✓ status is 200
 
     HTTP
-    http_req_duration..............: avg=7.02ms min=1.29ms med=6.91ms max=21.72ms p(90)=10.14ms p(95)=11.16ms
-      { expected_response:true }...: avg=7.02ms min=1.29ms med=6.91ms max=21.72ms p(90)=10.14ms p(95)=11.16ms
-    http_req_failed................: 0.00%  0 out of 84527
-    http_reqs......................: 84527  2817.085391/s
+    http_req_duration..............: avg=7.22ms min=1.31ms med=7.08ms max=35.12ms p(90)=10.8ms  p(95)=11.97ms
+      { expected_response:true }...: avg=7.22ms min=1.31ms med=7.08ms max=35.12ms p(90)=10.8ms  p(95)=11.97ms
+    http_req_failed................: 0.00%  0 out of 82104
+    http_reqs......................: 82104  2736.291157/s
 
     EXECUTION
-    iteration_duration.............: avg=7.09ms min=1.38ms med=6.97ms max=21.79ms p(90)=10.21ms p(95)=11.22ms
-    iterations.....................: 84527  2817.085391/s
+    iteration_duration.............: avg=7.29ms min=1.35ms med=7.15ms max=35.22ms p(90)=10.87ms p(95)=12.04ms
+    iterations.....................: 82104  2736.291157/s
     vus............................: 20     min=20         max=20
     vus_max........................: 20     min=20         max=20
 
     NETWORK
-    data_received..................: 195 MB 6.5 MB/s
-    data_sent......................: 147 MB 4.9 MB/s
+    data_received..................: 189 MB 6.3 MB/s
+    data_sent......................: 143 MB 4.8 MB/s
 
 
 
 
-running (0m30.0s), 00/20 VUs, 84527 complete and 0 interrupted iterations
+running (0m30.0s), 00/20 VUs, 82104 complete and 0 interrupted iterations
 presentation_query ✓ [ 100% ] 20 VUs  30s

@@ -1,9 +1,22 @@
 ds-identity-hub-rs (this repo)
-commit: 2d95df34cf23c069d5b2023ba8db873c74c71e51
-subject: ci.yml: fix stale dcp-tck job comment claiming partial conformance
-(the commit just before this benchmark's own commit was made - full 54/54
-real DCP TCK conformance had already been reached on this commit; see
-ARCHITECTURE.md's "DCP TCK conformance snapshot")
+commit: a3a5b781af71d0bf2487f9f75ea8b83ed302eb7e
+subject: ARCHITECTURE.md: fix stale change-count and cross-reference
+(post-hardening re-run: this commit includes the 2026-09-20 independent
+security audit's 9 fixes - 2 critical, 3 high, 4 medium - closing an
+auth-bypass, an SSRF-shaped outbound-confinement gap, unbounded jti/request/
+credential-graph growth, and a Storage API signing-oracle write path. See
+ARCHITECTURE.md's "What's simplified or stubbed", changes 9-13, and
+docs/benchmarks/<date>-edc-identity-hub-vs-rust-post-hardening-performance.md
+in the main dataspace repo for the full comparison against the pre-hardening
+commit 8307a1794587a2f015c60c03641c531bea995f5c this same bench/ directory
+measured previously.)
 
 Built with: cargo build --release -p identity-hub-http
 Run as: credential-service mode, --bind 0.0.0.0:18080 --did-host 127.0.0.1:18080
+  --trusted-issuer-did did:web:127.0.0.1%3A18080:sts-party
+  (the --trusted-issuer-did flag is new for this run - see bench-rust.sh's
+  own comment on STS_PARTY_DID for why: the 2026-09-20 hardening made an
+  empty --trusted-issuer-did list deny every Storage API write instead of
+  allowing every one, so the caller verifier-token's seed_credential()
+  authenticates as - this process's own STS-party identity - must now be
+  explicitly trusted or seeding gets a 401 instead of 200.)
