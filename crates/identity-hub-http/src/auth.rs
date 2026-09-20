@@ -64,6 +64,8 @@ pub enum AuthError {
         "nested access token is not bound to the party presenting it (aud does not match the outer envelope's own caller)"
     )]
     NestedTokenNotBoundToCaller,
+    #[error("nested access token issuer '{0}' is not authoritative for this service's credentials")]
+    NestedTokenIssuerNotAuthoritative(String),
 }
 
 /// Extracts a Self-Issued ID Token from an `Authorization: Bearer <jwt>`
@@ -186,27 +188,50 @@ pub fn check_trusted_issuer(
 /// from, and applied after, `verify_bearer_token`'s validation of the
 /// *outer* Self-Issued ID Token envelope that carries it.
 ///
-/// Verifies the nested token's own signature against its own resolved
-/// `did:web` issuer (the same `resolve_did`/`find_verifying_key`/
-/// `verify_jws_signature` primitives `verify_bearer_token` already uses for
-/// the outer envelope), checks it has not expired, and - the actual
-/// confused-deputy fix, closing `cs_04_03_03_idTokenInvalidIssuerSub` -
-/// checks the nested token's own `aud` claim equals `outer_sub` (the outer
-/// envelope's own `iss`/`sub`, i.e. whoever is actually presenting this
-/// request): a nested token minted for/bound to a *different* party is a
-/// forwarded token, not a legitimate grant to the party presenting it now.
+/// This checks both that the nested token is *authentic* (genuinely signed
+/// by whoever it claims to be from, not expired, bound to the party
+/// presenting it) and that its issuer is *authoritative* - i.e. actually
+/// recognized by this service as a party allowed to grant reads of its own
+/// credentials. The two are independent: an attacker who hosts a perfectly
+/// well-formed `did:web` document can mint a token that is authentic (it
+/// really is signed by them) but has no authority whatsoever over this
+/// service's store. Checking only authenticity was the 2026-09-20 security
+/// audit's Finding 2 (CRITICAL).
+///
+/// Concretely:
+/// - the nested token's own `iss` must equal `authoritative_issuer` (this
+///   service's own STS party DID - the only party this bootstrap's
+///   Presentation API recognizes as able to grant reads of its own store,
+///   see `handlers::granted_credential_types`'s call site for why). This is
+///   checked *before* `resolve_did` so an attacker-controlled DID is never
+///   fetched at all for a token that could never have been authoritative in
+///   the first place.
+/// - the nested token's own signature verifies against its own resolved
+///   `did:web` issuer (the same `resolve_did`/`find_verifying_key`/
+///   `verify_jws_signature` primitives `verify_bearer_token` already uses for
+///   the outer envelope);
+/// - it has not expired;
+/// - and - the confused-deputy fix, closing `cs_04_03_03_idTokenInvalidIssuerSub` -
+///   its own `aud` claim equals `outer_sub` (the outer envelope's own
+///   `iss`/`sub`, i.e. whoever is actually presenting this request): a
+///   nested token minted for/bound to a *different* party is a forwarded
+///   token, not a legitimate grant to the party presenting it now. This
+///   check is not subsumed by the issuer check above: a token our own STS
+///   genuinely minted (so `iss` passes) but bound to the verifier and
+///   forwarded by a third party must still be rejected here.
 ///
 /// Returns the nested token's decoded payload (so the caller can read its
 /// own `scope` claim) on success. Callers must treat any `Err` here as an
 /// outright rejection of the whole request rather than a fallback to
 /// unrestricted access - once a nested token is present at all, it must be
-/// genuinely authenticated, not best-effort-decoded (see
+/// genuinely authenticated and authorized, not best-effort-decoded (see
 /// `cs_05_04_invalidTokenNotAuthorized`, whose nested token, `"faketoken"`,
 /// isn't even a real JWS).
 pub async fn verify_nested_access_token(
     http: &reqwest::Client,
     nested_token: &str,
     outer_sub: &str,
+    authoritative_issuer: &str,
     insecure_http: bool,
 ) -> Result<Value, AuthError> {
     let (_, header, payload) = decode_jws_unverified(nested_token)
@@ -217,6 +242,12 @@ pub async fn verify_nested_access_token(
     let kid = header.get("kid").and_then(Value::as_str).ok_or_else(|| {
         AuthError::InvalidNestedToken("nested token has no kid header".to_string())
     })?;
+
+    if nested_iss != authoritative_issuer {
+        return Err(AuthError::NestedTokenIssuerNotAuthoritative(
+            nested_iss.to_string(),
+        ));
+    }
 
     let issuer_doc = resolve_did(http, nested_iss, insecure_http)
         .await

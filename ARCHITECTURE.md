@@ -5,7 +5,7 @@ measured conformance on the Credential Service scope this project targets
 (see "DCP TCK conformance snapshot" below). Not yet integrated with a live
 dataspace control plane, a real key-management/HSM backend, or a persistent
 store.
-**Date:** 2026-09-20 (eight changes today: real per-request authorization
+**Date:** 2026-09-20 (nine changes today: real per-request authorization
 added to the Storage API and Credential Offer API; then `verify_bearer_token`
 gained `iss == sub`, `nbf`, `capabilityInvocation`, and `jti`-replay checks;
 then the Presentation API gained scope-escalation enforcement against the
@@ -20,13 +20,21 @@ Offer API gained real message-content/business-logic validation (required
 `CredentialMessage` fields, a `status` allow-list, a known-`holderPid`
 allow-list, genuine embedded-credential proof verification, and offer
 `credentials`-array/catalog checks — see `identity_hub_http::validation`);
-then, finally, the Presentation API's nested `token` claim (the actual
+then the Presentation API's nested `token` claim (the actual
 Verifiable-Presentation access token a caller forwards) gained genuine
 authentication — signature verification against its own resolved `did:web`
 issuer plus a binding check back to the outer envelope's own caller — closing
-the last two documented gaps; see "What's simplified or stubbed" and "DCP TCK
-conformance snapshot" below — 36 -> 22 -> 12 -> 11 -> 9 -> 8 -> 2 -> **0** real
-TCK failures, each step TDD'd and re-measured, not assumed)
+the DCP TCK's own last two documented gaps and reaching full, real 54/54
+conformance; then, later the same day, an independent security audit of the
+now-54/54 codebase found three real, TCK-invisible gaps in the model behind
+that same nested-token check — a missing grant read as "no restriction"
+rather than "no access" (CRITICAL), an authenticity check with no
+accompanying authority check (CRITICAL), and this hub's own STS minting
+nested tokens its own verifier could never accept (MEDIUM) — all three
+fixed the same day; see "What's simplified or stubbed" and "DCP TCK
+conformance snapshot" below — 36 -> 22 -> 12 -> 11 -> 9 -> 8 -> 2 -> **0**
+real TCK failures across the first eight changes, each TDD'd and
+re-measured, not assumed, and 54/54 reconfirmed unchanged after the ninth)
 
 This file records the scope and design decisions behind this project's
 bootstrap, why each was made, and an honest accounting of what actually
@@ -507,22 +515,115 @@ including the first (wrong) fixes tried along the way).
   forwarded token's `scope` claim is itself completely genuine). TDD'd:
   `tests/nested_access_token_authentication.rs` asserts both cases
   red-then-green, plus regression guards that a nested token correctly
-  bound to its own presenter still succeeds, an expired-but-otherwise-valid
-  nested token is also rejected, and a bare outer envelope with no nested
-  token at all keeps this bootstrap's pre-existing, deliberately permissive
-  default. Fixing this also surfaced (and fixed) a latent gap in this
-  crate's own *test* fixtures, not production code: `presentation_scope_enforcement.rs`'s
-  nested-token helper had been minting tokens bound (`aud`) to the
-  Credential Service's own DID rather than to the caller presenting them —
-  harmless before this change (nothing checked `aud` on the nested token at
-  all) but a false regression the moment the binding check went in; fixed
-  by binding it to the caller's own DID, matching what the real TCK
-  actually does. Real, measured effect on TCK conformance: closed exactly
-  `cs_04_03_03_idTokenInvalidIssuerSub` and
-  `cs_05_04_invalidTokenNotAuthorized` (2 -> **0**), confirmed against the
-  real TCK, reproduced identically three times (54/54 `SUCCESSFUL` every
+  bound to its own presenter still succeeds and an expired-but-otherwise-valid
+  nested token is also rejected. At the time of this change, a bare outer
+  envelope with no nested token at all kept this bootstrap's pre-existing,
+  deliberately permissive default — **that default was itself a critical
+  read-authorization bypass, closed the same day by an independent security
+  audit; see the "Deny-by-default read authorization" bullet below, which
+  supersedes this paragraph's own regression guard.** Fixing this also
+  surfaced (and fixed) a latent gap in this crate's own *test* fixtures, not
+  production code: `presentation_scope_enforcement.rs`'s nested-token helper
+  had been minting tokens bound (`aud`) to the Credential Service's own DID
+  rather than to the caller presenting them — harmless before this change
+  (nothing checked `aud` on the nested token at all) but a false regression
+  the moment the binding check went in; fixed by binding it to the caller's
+  own DID, matching what the real TCK actually does. Real, measured effect
+  on TCK conformance: closed exactly `cs_04_03_03_idTokenInvalidIssuerSub`
+  and `cs_05_04_invalidTokenNotAuthorized` (2 -> **0**), confirmed against
+  the real TCK, reproduced identically three times (54/54 `SUCCESSFUL` every
   run), with zero regressions on the other 52 previously-passing tests —
   see "DCP TCK conformance snapshot".
+- **Deny-by-default read authorization plus issuer authority, added
+  2026-09-20 (ninth change, later the same day, closing an independent
+  security audit's Findings 1, 2, and 9).** The bullet above closed the DCP
+  TCK's own two nested-token gaps, but a separate, same-day independent
+  security audit found the model behind it still had two CRITICAL holes and
+  one MEDIUM one, none of them TCK-visible (no TCK case exercises them):
+  - **Finding 1 (CRITICAL) — a missing grant was more powerful than a real
+    one.** `handlers::granted_credential_types` returned `Ok(None)` for a
+    bare outer envelope with no nested `token` claim at all, and
+    `presentation_query` read `None` as "no restriction", handing back
+    every stored credential of the requested type. This was the
+    "deliberately permissive default" the bullet above (and this file's
+    earlier revisions) documented as intentional — it was not; it was the
+    bypass. Fixed by dropping the `Option` entirely:
+    `granted_credential_types` now returns `Result<Vec<String>, AuthError>`,
+    empty when there is no grant, and `presentation_query` always
+    intersects the requested types against it rather than special-casing
+    "no grant" as "no restriction". A missing grant now returns a normal
+    `200` carrying a Verifiable Presentation with an empty
+    `verifiableCredential` array — disclosing nothing, not refusing the
+    request outright — matching the model the pre-existing
+    scope-escalation path already used.
+  - **Finding 2 (CRITICAL) — authenticity was checked, authority never
+    was.** `auth::verify_nested_access_token` proved a nested token was
+    genuinely signed by whoever its own `iss` claimed to be, but never asked
+    whether that `iss` had any standing to grant reads of *this* service's
+    credentials. An attacker hosting their own well-formed `did:web`
+    document could mint `{iss: sub: aud: <own did>, scope: <anything>}`,
+    sign it with their own key, and be handed back whatever they typed.
+    Fixed by a new `authoritative_issuer` parameter: the nested token's
+    `iss` must equal it or the request is rejected
+    (`AuthError::NestedTokenIssuerNotAuthoritative`, mapped to `401` like
+    every other `AuthError`), checked *before* `resolve_did` so an
+    attacker-named DID is never fetched at all for a token that could never
+    have been authoritative. The call site
+    (`handlers::granted_credential_types`) passes `state.sts_party.own_did()`
+    — the one identity this process's own STS ever signs access tokens
+    with, and in this bootstrap the only party with any standing to grant
+    reads from its own store. The pre-existing `aud`-binding check against
+    the outer envelope's own `sub` stays, unchanged and un-subsumed: it
+    catches a token our own STS genuinely minted (so the issuer check
+    passes) but bound to the verifier and forwarded by a third party —
+    exactly `cs_04_03_03_idTokenInvalidIssuerSub` above, which the issuer
+    check alone would not catch.
+  - **Finding 9 (MEDIUM) — this hub's own STS minted tokens its own
+    verifier always rejected.** `sts::issue_token` bound the nested access
+    token's `aud` to `req.audience` unconditionally — correct for the DCP
+    hand-off the TCK exercises (the audience is the verifier that will
+    receive and re-present the nested grant), but wrong for the direct case
+    (a caller asking for a token to present straight back to this
+    Credential Service): there, the outer envelope's own `sub` is always
+    `signer.own_did()` (the STS's own party), so the nested `aud`
+    (`req.audience`, forced by `verify_bearer_token` to be this service's
+    own DID) could never match it. The one legitimate, direct-use path was
+    a guaranteed `401` — which is exactly why Finding 1's bypass was
+    load-bearing rather than theoretical: presenting no grant at all was
+    the only way to get a presentation back. Fixed by deriving the nested
+    `aud` from whether `req.audience` equals the service's own DID
+    (`StsTokenRequest::own_service_did`, newly threaded through from
+    `handlers::sts_token`): if so, the presenter is the STS party itself
+    (`aud = signer.own_did()`); otherwise, unchanged
+    (`aud = req.audience`). The outer envelope's own `aud` stays
+    `req.audience` in both cases.
+
+  TDD'd: `tests/nested_token_authorization.rs` (new) asserts all three
+  findings red-then-green against the real HTTP layer — a bare envelope
+  discloses nothing, an untrusted self-signed nested token is rejected, and
+  a token genuinely obtained from this hub's own `/sts/token` is accepted
+  end-to-end by its own `/presentations/query` and correctly scoped to what
+  it was granted — plus inverted regression assertions in
+  `nested_access_token_authentication.rs` and
+  `presentation_scope_enforcement.rs` (both previously asserted the
+  bypass itself as a "keeps working" guard) and three new/updated unit
+  tests in `identity-hub-core/src/sts.rs` covering both the direct and
+  hand-off `aud`-derivation branches. TCK-safety was confirmed, not
+  assumed, by decompiling `dcp-tck-runtime`:
+  `SecureTokenServerImpl.obtainReadToken` sources every nested access token
+  from this hub's own `/sts/token`, so every TCK nested token's `iss` is
+  `sts_party` (the issuer check cannot regress it), and no TCK presentation
+  test presents a bare envelope expecting a successful, non-empty
+  disclosure (deny-by-default cannot regress it either). Real, measured
+  effect on TCK conformance: **54/54, unchanged**, confirmed against the
+  real TCK, reproduced identically three times — see "DCP TCK conformance
+  snapshot"; this fix closed three audit findings the TCK itself never
+  exercised, not TCK regressions.
+  Explicitly out of scope for this change (a separate audit finding, not
+  widened into this one): the STS still authenticates every caller with one
+  hardcoded `client_id`/`client_secret` pair
+  (`Config::sts_client_id`/`sts_client_secret`), so anyone holding those
+  credentials can still mint a grant for any scope.
 - **Trusted-issuer allow-list check, added 2026-09-20 (sixth change
   today).** `verify_bearer_token` accepting any `iss` whose `did:web`
   document resolves and whose key verifies the token's signature (and is
@@ -736,11 +837,22 @@ Scoped to the Credential Service test packages
 | `issuance.cs` (CIP) | 31 | 31 | 0 |
 | **Total** | **54** | **54** | **0** |
 
+**Reconfirmed unchanged after a ninth, later change the same day** (see
+"What's simplified or stubbed"'s "Deny-by-default read authorization plus
+issuer authority" bullet): an independent security audit found three
+gaps in the model behind the eighth change's nested-token authentication
+that no TCK test exercises (a missing grant read as unrestricted access, a
+self-signed token from a non-authoritative issuer, and this hub's own STS
+minting tokens its own verifier rejected). Fixing them was re-run against
+the same real TCK container and reproduced the identical 54/54 result
+three more times — the security fix closed real, TCK-invisible gaps, not
+TCK regressions, and did not change this table.
+
 `tests/dcp_tck.rs`'s `dcp_tck_reports_full_credential_service_conformance`
 now asserts the TCK's own reported failure set is genuinely empty — not a
 count check, an assertion against the actual set of failing test method
 names the TCK's own stack traces name, which happens to be empty. Before
-today's eighth change, this test asserted an **exact set** of 2 known
+the eighth change, this test asserted an **exact set** of 2 known
 failing test names (`EXPECTED_FAILURES`, now retired — see that test's own
 doc comment for why keeping an always-empty constant around would serve no
 purpose): `cs_04_03_03_idTokenInvalidIssuerSub` and
@@ -909,6 +1021,12 @@ ds-identity-hub-rs/
                                   (signature + confused-deputy binding
                                   check) on the Presentation API (real
                                   HTTP, no Docker/TCK needed).
+        nested_token_authorization.rs
+                                  Deny-by-default read authorization plus
+                                  issuer-authority checks on the
+                                  Presentation API (2026-09-20 security
+                                  audit Findings 1, 2, 9 — real HTTP, no
+                                  Docker/TCK needed).
   vendor/
     contreforts-core/      Git submodule (contreforts-ai/contreforts-core),
                             pinned to commit 95a4940 - the same commit
