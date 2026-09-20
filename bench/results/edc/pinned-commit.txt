@@ -1,0 +1,7 @@
+eclipse-edc/IdentityHub
+tag: v0.18.0
+commit: 60091fb68eb7de0eb2f290281ec4af44cc3e467f
+vendored at: dataspace/vendor/identity-hub (git submodule, sibling repo to this one)
+Seed environment adapted from: ds-catalog-broker-rs/compliance/dcp-test-env
+(read-only reference; copied into bench/edc-identity-hub/, see that
+directory's own files and bench/README.md).

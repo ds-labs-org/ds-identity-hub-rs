@@ -1,0 +1,87 @@
+
+         /\      Grafana   /‾‾/  
+    /\  /  \     |\  __   /  /   
+   /  \/    \    | |/ /  /   ‾‾\ 
+  /          \   |   (  |  (‾)  |
+ / __________ \  |_|\_\  \_____/ 
+
+
+     execution: local
+        script: /home/coder/deepthought-solutions/dataspace/ds-identity-hub-rs/bench/load/presentation-query.k6.js
+        output: -
+
+     scenarios: (100.00%) 1 scenario, 5 max VUs, 40s max duration (incl. graceful stop):
+              * presentation_query: 5 looping VUs for 10s (gracefulStop: 30s)
+
+
+running (01.0s), 5/5 VUs, 680 complete and 0 interrupted iterations
+presentation_query   [  10% ] 5 VUs  01.0s/10s
+
+running (02.0s), 5/5 VUs, 2221 complete and 0 interrupted iterations
+presentation_query   [  20% ] 5 VUs  02.0s/10s
+
+running (03.0s), 5/5 VUs, 4250 complete and 0 interrupted iterations
+presentation_query   [  30% ] 5 VUs  03.0s/10s
+
+running (04.0s), 5/5 VUs, 6534 complete and 0 interrupted iterations
+presentation_query   [  40% ] 5 VUs  04.0s/10s
+
+running (05.0s), 5/5 VUs, 8864 complete and 0 interrupted iterations
+presentation_query   [  50% ] 5 VUs  05.0s/10s
+
+running (06.0s), 5/5 VUs, 11340 complete and 0 interrupted iterations
+presentation_query   [  60% ] 5 VUs  06.0s/10s
+
+running (07.0s), 5/5 VUs, 13868 complete and 0 interrupted iterations
+presentation_query   [  70% ] 5 VUs  07.0s/10s
+
+running (08.0s), 5/5 VUs, 16410 complete and 0 interrupted iterations
+presentation_query   [  80% ] 5 VUs  08.0s/10s
+
+running (09.0s), 5/5 VUs, 19009 complete and 0 interrupted iterations
+presentation_query   [  90% ] 5 VUs  09.0s/10s
+
+running (10.0s), 5/5 VUs, 21599 complete and 0 interrupted iterations
+presentation_query   [ 100% ] 5 VUs  10.0s/10s
+
+
+  █ THRESHOLDS 
+
+    http_req_duration
+    ✓ 'p(95)<5000' p(95)=3.56ms
+    ✓ 'p(99)<5000' p(99)=7.17ms
+
+    http_req_failed
+    ✓ 'rate<0.01' rate=0.01%
+
+
+  █ TOTAL RESULTS 
+
+    checks_total.......: 21608  2160.292112/s
+    checks_succeeded...: 99.98% 21605 out of 21608
+    checks_failed......: 0.01%  3 out of 21608
+
+    ✗ status is 200
+      ↳  99% — ✓ 21605 / ✗ 3
+
+    HTTP
+    http_req_duration..............: avg=2.24ms min=1.14ms med=2.2ms  max=163.57ms p(90)=2.86ms p(95)=3.56ms
+      { expected_response:true }...: avg=2.24ms min=1.14ms med=2.2ms  max=163.57ms p(90)=2.86ms p(95)=3.56ms
+    http_req_failed................: 0.01% 3 out of 21608
+    http_reqs......................: 21608 2160.292112/s
+
+    EXECUTION
+    iteration_duration.............: avg=2.3ms  min=1.16ms med=2.26ms max=163.97ms p(90)=2.94ms p(95)=3.65ms
+    iterations.....................: 21608 2160.292112/s
+    vus............................: 5     min=5          max=5
+    vus_max........................: 5     min=5          max=5
+
+    NETWORK
+    data_received..................: 50 MB 5.0 MB/s
+    data_sent......................: 38 MB 3.8 MB/s
+
+
+
+
+running (10.0s), 0/5 VUs, 21608 complete and 0 interrupted iterations
+presentation_query ✓ [ 100% ] 5 VUs  10s

@@ -1,0 +1,2 @@
+[2m2026-09-20T07:30:18.541674Z[0m [32m INFO[0m [2midentity_hub[0m[2m:[0m starting ds-identity-hub-rs [3mmode[0m[2m=[0mCredentialService [3mbind[0m[2m=[0m0.0.0.0:18080 [3mdid_host[0m[2m=[0m127.0.0.1:18080
+[2m2026-09-20T07:30:18.543049Z[0m [32m INFO[0m [2midentity_hub[0m[2m:[0m ContrefortsConnector::pull round trip (stored credentials) [3mcount[0m[2m=[0m0

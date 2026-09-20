@@ -1,0 +1,7 @@
+# Regenerable, throwaway key material and compiled classes for this local
+# DCP benchmark environment - never commit private keys, even test ones.
+# Regenerate via ../README.md / run-identityhub.sh.
+keys/
+seed/out/
+seed/*.jar
+seed/*-classpath.txt

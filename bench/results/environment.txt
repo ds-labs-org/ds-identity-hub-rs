@@ -1,0 +1,25 @@
+Shared benchmark environment - both legs (EDC IdentityHub and ds-identity-hub-rs)
+ran on the same otherwise-idle host, one process under load at a time.
+
+nproc: 22
+CLK_TCK: 100
+uname -a: Linux mainworkws 6.8.0-139-generic #139-Ubuntu SMP PREEMPT_DYNAMIC Sat Aug  1 03:52:05 UTC 2026 x86_64 x86_64 x86_64 GNU/Linux
+java -version: openjdk version "21.0.12" 2026-07-21 (OpenJDK Runtime Environment, build 21.0.12+8-1-24.04-Ubuntu)
+rustc --version: rustc 1.96.1 (31fca3adb 2026-06-26)
+cargo --version: cargo 1.96.1 (356927216 2026-06-26)
+k6 version: k6 v2.2.0 (commit/00a9a1b7f5, go1.26.5, linux/amd64)
+
+Load profile (both legs, per docs/benchmarks/2026-08-27-dcp-auth-overhead.md's
+methodology): k6 constant-vus executor, 20 VUs, 30s measured duration, one
+target process under load at a time, never concurrently.
+- EDC leg warmup: 5 VUs, 10s, discarded.
+- Rust leg warmup: 5 VUs, 10s, discarded.
+
+RSS/CPU sampling: bench/sample-rss-cpu.sh, a 1-second-interval loop reading
+/proc/<pid>/status (VmRSS) and /proc/<pid>/stat (fields 14+15, utime+stime in
+jiffies), converted to CPU% via CLK_TCK - the real PID bound to the listening
+socket (resolved via `ss -tlnp`), never `$!` after a wrapped `nohup ... &`
+launch (that pitfall is documented in the script's own header and in
+docs/benchmarks/2026-08-27-dcp-auth-overhead.md's "one real mechanical error"
+section - this benchmark deliberately follows the corrected pattern from the
+start).

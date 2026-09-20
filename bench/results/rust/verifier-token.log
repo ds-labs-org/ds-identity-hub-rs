@@ -1,0 +1,5 @@
+issuer DID:   did:web:127.0.0.1%3A18091:issuer
+verifier DID: did:web:127.0.0.1%3A18091:verifier
+verifier-token DID-hosting server listening on 0.0.0.0:18091
+seeded 1 'MembershipCredential' credential into http://127.0.0.1:18080 (issuerPid=bench-issuer-pid, holderPid=bench-holder-pid)
+ready: GET http://0.0.0.0:18091/mint for a fresh presentation-query bearer token

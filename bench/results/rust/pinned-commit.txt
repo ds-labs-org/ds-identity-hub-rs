@@ -1,0 +1,9 @@
+ds-identity-hub-rs (this repo)
+commit: 2d95df34cf23c069d5b2023ba8db873c74c71e51
+subject: ci.yml: fix stale dcp-tck job comment claiming partial conformance
+(the commit just before this benchmark's own commit was made - full 54/54
+real DCP TCK conformance had already been reached on this commit; see
+ARCHITECTURE.md's "DCP TCK conformance snapshot")
+
+Built with: cargo build --release -p identity-hub-http
+Run as: credential-service mode, --bind 0.0.0.0:18080 --did-host 127.0.0.1:18080
