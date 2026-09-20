@@ -5,7 +5,7 @@ measured conformance on the Credential Service scope this project targets
 (see "DCP TCK conformance snapshot" below). Not yet integrated with a live
 dataspace control plane, a real key-management/HSM backend, or a persistent
 store.
-**Date:** 2026-09-20 (nine changes today: real per-request authorization
+**Date:** 2026-09-20 (thirteen changes today: real per-request authorization
 added to the Storage API and Credential Offer API; then `verify_bearer_token`
 gained `iss == sub`, `nbf`, `capabilityInvocation`, and `jti`-replay checks;
 then the Presentation API gained scope-escalation enforcement against the
@@ -992,10 +992,10 @@ including the first (wrong) fixes tried along the way).
   closed exactly the six tests named above (8 -> 2), confirmed against the
   real TCK, reproduced identically twice, with zero regressions on the
   other 46 previously-passing tests. (Scope-based authorization against a
-  caller's own granted scope was part of "No nested-access-token
-  authentication" above until an earlier change today closed it — see
-  "Scope-escalation enforcement" above; that gap is unrelated to, and
-  unchanged by, this one.)
+  caller's own granted scope is covered by "Scope-escalation enforcement"
+  above, and nested-access-token signature/authority verification by
+  "Nested-access-token authentication (confused-deputy fix)" below; that
+  gap is unrelated to, and unchanged by, this one.)
 - **No revocation status checking** (`StatusList2021`/
   `BitstringStatusList`) on presented or stored credentials.
 - **No durable storage, but real semantic structure now (2026-09-20).**
