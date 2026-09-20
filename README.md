@@ -111,8 +111,11 @@ cargo test -p identity-hub-http --test dcp_tck -- --ignored --nocapture   # need
 ## Running it
 
 ```bash
-# Credential Service (VPP + CIP):
-cargo run -p identity-hub-http --bin identity-hub -- credential-service --did-host localhost:8080
+# Credential Service (VPP + CIP). --trusted-issuer-did is required (may be
+# repeated) - an empty allow-list trusts nobody, so the Storage API and
+# Credential Offer API reject every write with 401 until at least one is
+# given (2026-09-20 fix, HIGH; see Config::trusted_issuer_dids's doc comment):
+cargo run -p identity-hub-http --bin identity-hub -- credential-service --did-host localhost:8080 --trusted-issuer-did did:web:some-issuer.example:issuer
 
 # Minimal Issuer Service (CIP only):
 cargo run -p identity-hub-http --bin identity-hub -- issuer-service --bind 0.0.0.0:8081 --did-host localhost:8081

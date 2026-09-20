@@ -38,6 +38,8 @@ pub enum ValidationError {
     UnknownHolderPid(String),
     #[error("a credential's own embedded proof could not be verified: {0}")]
     UnverifiableProof(String),
+    #[error("credential format '{0}' cannot be verified by this service")]
+    UnsupportedCredentialFormat(String),
     #[error("a CredentialOfferMessage must offer at least one credential")]
     EmptyCredentials,
     #[error("offered credential id '{0}' does not match the issuer's own known catalog")]
@@ -62,9 +64,12 @@ pub fn validate_status(status: &str) -> Result<(), ValidationError> {
 /// `holderPid` must match a value this service was configured to expect -
 /// see `Config::known_holder_pids`'s doc comment for why an empty list
 /// (this bootstrap's permissive default) means no restriction is
-/// configured, the same posture `Config::trusted_issuer_dids` already
-/// established for the caller's own identity rather than the message's
-/// correlation id.
+/// configured, checking *which request* a message claims to answer rather
+/// than *who* sent it - that's `crate::auth::check_trusted_issuer`'s job,
+/// and, unlike this check, it now denies by default (2026-09-20 fix; see
+/// its own doc comment). `known_holder_pids` itself is deliberately out of
+/// scope for that fix and keeps its permissive empty-means-unrestricted
+/// default.
 pub fn check_known_holder_pid(
     holder_pid: &str,
     known_holder_pids: &[String],
@@ -88,11 +93,30 @@ pub fn check_known_holder_pid(
 /// by someone other than the party it claims to be from) was accepted just
 /// as readily as a genuine one.
 ///
-/// A non-JWT-format container (`format` not containing `"jwt"`, e.g. a
-/// JSON-LD credential) is left opaque and unverified here, matching
-/// `identity_hub_graph::store`'s own module doc comment on why this store
-/// never decodes a non-JWT payload either - out of scope for this
-/// bootstrap, not silently assumed valid by omission.
+/// **Closed set, not a skip** (2026-09-20 independent security audit, HIGH:
+/// see `../../ARCHITECTURE.md`, "What's simplified or stubbed", and
+/// `storage_write_default_posture.rs`): a container whose `format` (after
+/// trimming and lowercasing) contains `"jwt"` is the one shape this service
+/// can actually verify, and takes the path below unchanged. Every other
+/// value - `"ldp_vc"`, an empty string, anything - is rejected outright
+/// with [`ValidationError::UnsupportedCredentialFormat`] *before* its
+/// `payload` is ever inspected, rather than being stored unverified as
+/// before. Before this fix, `handlers::build_presentation` would later copy
+/// such a stored `payload` verbatim into a Verifiable Presentation signed
+/// with this service's own key - turning the Storage API into a signing
+/// oracle for arbitrary attacker-supplied JSON.
+///
+/// The substring match (not an exact `"jwt"` literal) is deliberate and
+/// pinned by `storage_write_default_posture.rs`'s two compatibility guards:
+/// the real `eclipsedataspacetck/dcp-tck-runtime:latest`'s own
+/// `CredentialFormat` enum (read out of `/app/tck-runtime.jar`, not
+/// guessed) has exactly `VC1_0_JWT` (profile string `vc11-sl2021/jwt`) and
+/// `VC2_0_JOSE` (`vc20-bssl/jwt`), and only `VC1_0_JWT` is used by the two
+/// Credential-Service test packages this bootstrap runs - so both
+/// `"VC1_0_JWT"` and `"vc11-sl2021/jwt"` must stay accepted alongside this
+/// bootstrap's own Issuer Service's `"jwt"` label
+/// (`handlers::try_deliver_issued_credential`), and narrowing to the
+/// literal string `"jwt"` would have silently regressed the TCK.
 pub async fn verify_credential_proofs(
     http: &reqwest::Client,
     credentials: &[CredentialContainer],
@@ -100,8 +124,11 @@ pub async fn verify_credential_proofs(
     outbound: &OutboundPolicy,
 ) -> Result<(), ValidationError> {
     for container in credentials {
-        if !container.format.to_lowercase().contains("jwt") {
-            continue;
+        let format = container.format.trim().to_lowercase();
+        if !format.contains("jwt") {
+            return Err(ValidationError::UnsupportedCredentialFormat(
+                container.format.clone(),
+            ));
         }
         let jws = container.payload.as_str().ok_or_else(|| {
             ValidationError::UnverifiableProof(

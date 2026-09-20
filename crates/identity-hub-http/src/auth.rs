@@ -58,6 +58,10 @@ pub enum AuthError {
     TokenReplayed,
     #[error("issuer '{0}' is not on this service's trusted-issuer allow-list")]
     UntrustedIssuer(String),
+    #[error(
+        "no trusted issuer is configured for this service - the Storage/Credential Offer API rejects every caller until at least one --trusted-issuer-did is given"
+    )]
+    NoTrustedIssuerConfigured,
     #[error("nested access token is not valid: {0}")]
     InvalidNestedToken(String),
     #[error("nested access token has expired")]
@@ -178,16 +182,26 @@ pub async fn verify_bearer_token(
 /// `verify_bearer_token`'s signature/envelope checks, which only prove a
 /// token's `iss` really signed it - not that this service has any reason to
 /// treat that `iss` as *the* issuer it expects to hear from on an endpoint
-/// like the Storage API or Credential Offer API. `trusted_issuer_dids` empty
-/// means no restriction is configured (this bootstrap's permissive default -
-/// see `Config::trusted_issuer_dids`'s doc comment); non-empty, `claims`'
-/// `iss` must be one of them.
+/// like the Storage API or Credential Offer API.
+///
+/// **Deny by default** (2026-09-20 independent security audit, HIGH: see
+/// `../../ARCHITECTURE.md`, "What's simplified or stubbed", and
+/// `storage_write_default_posture.rs`): the whole rule collapses to "`iss`
+/// must be an element of `trusted_issuer_dids`", with an empty list
+/// trivially matching nothing - so a service booted with no
+/// `--trusted-issuer-did` at all trusts *nobody*, not everybody. The
+/// opt-in mechanism this replaces a permissive default with is unchanged:
+/// `Config::trusted_issuer_dids` / `Config::with_trusted_issuer_dids` /
+/// the repeatable `--trusted-issuer-did` CLI flag, which the real
+/// `eclipse-dataspacetck/dcp-tck`'s own SUT configuration
+/// (`dataspacetck.did.issuer`) already uses explicitly - see
+/// `tests/dcp_tck.rs`.
 pub fn check_trusted_issuer(
     claims: &Value,
     trusted_issuer_dids: &[String],
 ) -> Result<(), AuthError> {
     if trusted_issuer_dids.is_empty() {
-        return Ok(());
+        return Err(AuthError::NoTrustedIssuerConfigured);
     }
     let iss = claims.get("iss").and_then(Value::as_str).unwrap_or("");
     if trusted_issuer_dids.iter().any(|trusted| trusted == iss) {

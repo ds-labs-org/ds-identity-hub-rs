@@ -38,10 +38,27 @@ metadata fetches) is now confined to an explicit, deny-by-default host
 allow-list derived from this service's own configuration
 (`identity_hub_http::outbound::OutboundPolicy`), and the shared `reqwest`
 client now carries a connect and total request timeout where before it had
-neither; see "What's simplified or stubbed" and "DCP TCK conformance
-snapshot" below — 36 -> 22 -> 12 -> 11 -> 9 -> 8 -> 2 -> **0** real TCK
-failures across the first eight changes, each TDD'd and re-measured, not
-assumed, and 54/54 reconfirmed unchanged after both the ninth and tenth)
+neither; then, an eleventh change the same day, the same audit's remaining
+HIGH finding on the Storage API was fixed: `Config::trusted_issuer_dids`
+shipping empty meant "no restriction" rather than "trust nobody", so a bare
+`cargo run -- credential-service` accepted a `CredentialMessage` from any
+party that could host a `did:web` document, and separately,
+`validation::verify_credential_proofs` skipped proof verification entirely
+for any credential `format` not containing `"jwt"` (including an empty
+string), storing it unverified — combined, an open-write Storage API plus a
+format-bypass signing oracle, since `handlers::build_presentation` later
+copies a stored credential's payload verbatim into a Verifiable
+Presentation signed with this service's own key. Both halves are now fixed:
+`auth::check_trusted_issuer` denies every issuer when the allow-list is
+empty (the TCK's own `dataspacetck.did.issuer` opt-in is unaffected — it
+was never empty), and `verify_credential_proofs` rejects any format it
+cannot verify outright instead of skipping it, while keeping both of the
+real TCK's own JWT format labels (`VC1_0_JWT`, `vc11-sl2021/jwt`, read out
+of `/app/tck-runtime.jar`, not guessed) accepted; see "What's simplified or
+stubbed" and "DCP TCK conformance snapshot" below — 36 -> 22 -> 12 -> 11 ->
+9 -> 8 -> 2 -> **0** real TCK failures across the first eight changes, each
+TDD'd and re-measured, not assumed, and 54/54 reconfirmed unchanged after
+the ninth, tenth, and eleventh)
 
 This file records the scope and design decisions behind this project's
 bootstrap, why each was made, and an honest accounting of what actually
@@ -731,6 +748,95 @@ including the first (wrong) fixes tried along the way).
   against the real TCK, reproduced identically three times — see "DCP TCK
   conformance snapshot"; like the ninth change, this fix closed real,
   TCK-invisible gaps, not TCK regressions.
+- **Storage API deny-by-default posture plus a closed credential-format
+  set, added 2026-09-20 (eleventh change, closing the same independent
+  security audit's remaining HIGH finding).** Two independent halves of one
+  signing-oracle gap, both on the Storage API (`POST /credentials`), each
+  TCK-invisible because the TCK's own SUT configuration never exercised the
+  unconfigured/unsupported-format case in the first place.
+  - **Half (a): the shipped default trusted nobody by mistake in the other
+    direction.** `auth::check_trusted_issuer` (see "Trusted-issuer
+    allow-list check" above) read an *empty* `Config::trusted_issuer_dids`
+    as "no restriction is configured" rather than "no issuer is trusted" —
+    so a bare `cargo run -- credential-service`, with no
+    `--trusted-issuer-did` at all, accepted a `CredentialMessage` from any
+    party that could host a `did:web` document and self-sign a genuine
+    Self-Issued ID Token: no configuration, no relationship, no prior
+    request. Fixed by collapsing the whole function to "`iss` must be an
+    element of `trusted_issuer_dids`", with an empty list trivially
+    matching nothing (`AuthError::NoTrustedIssuerConfigured`, mapped to the
+    same `401` every `AuthError` already gets). The opt-in mechanism this
+    replaces a permissive default with is **unchanged**:
+    `Config::trusted_issuer_dids` / `Config::with_trusted_issuer_dids` /
+    the repeatable `--trusted-issuer-did` CLI flag — the real TCK's own SUT
+    configuration (`dataspacetck.did.issuer`, wired in
+    `tests/dcp.tck.properties`/`tests/dcp_tck.rs`) was never empty, so this
+    fix tightens only the *unconfigured* default, not the TCK's own
+    correctly-scoped configuration. A new `tracing::warn!` at startup
+    (`main.rs`) tells an operator who forgot the flag entirely that every
+    Storage/Offer write will be rejected, without refusing to boot.
+    `Config::known_holder_pids` is explicitly **out of scope** for this fix
+    and keeps its own permissive empty-means-unrestricted default (see
+    `validation::check_known_holder_pid`'s doc comment) — this bootstrap
+    still has no Credential-Request-tracking state to populate it from (see
+    "A holder-driven response to a Credential Offer" below), and widening
+    this fix to cover it too would have been a different, undiscussed
+    change, not a surgical one.
+  - **Half (b): a `format` this service cannot verify was stored anyway.**
+    `validation::verify_credential_proofs` verified a container's own
+    embedded proof only when its `format` contained the substring `"jwt"`;
+    every other value (`"ldp_vc"`, an empty string, anything) skipped the
+    check entirely and was stored unverified. Combined with
+    `handlers::build_presentation`, which copies a stored credential's
+    `payload` verbatim into a Verifiable Presentation signed with *this
+    service's own key*, that turned the Storage API into a signing oracle
+    for arbitrary attacker-supplied JSON — no different in effect from
+    Finding 2's missing-authority gap fixed earlier the same day, just on
+    the write path instead of the read path. Fixed by replacing the skip
+    with a closed set: a `format` (trimmed, lowercased) containing `"jwt"`
+    takes the existing verification path unchanged; anything else is
+    rejected outright with a new `ValidationError::UnsupportedCredentialFormat`
+    (`400`, via the existing `validation_error_response` — a message-content
+    defect, not an auth one), carrying the format as received, *before* its
+    `payload` is inspected at all. The whole `CredentialMessage` is still
+    rejected on the first failing container (no partial acceptance,
+    unchanged from before). The substring match is deliberate, not a
+    loosening: the real `eclipsedataspacetck/dcp-tck-runtime:latest`'s own
+    `CredentialFormat` enum (read out of `/app/tck-runtime.jar`, not
+    guessed) has exactly `VC1_0_JWT` (`vc11-sl2021/jwt`) and `VC2_0_JOSE`
+    (`vc20-bssl/jwt`), and only `VC1_0_JWT` is used by the two
+    Credential-Service test packages this bootstrap runs — so both
+    `"VC1_0_JWT"` and `"vc11-sl2021/jwt"` stay on the accepted path
+    alongside this bootstrap's own Issuer Service's `"jwt"` label
+    (`handlers::try_deliver_issued_credential`); narrowing to the literal
+    string `"jwt"` would have silently regressed the TCK.
+    `identity_hub_graph`'s store itself stays format-agnostic (its own
+    `"ldp_vc"` unit test is untouched) — this is an HTTP-layer intake rule
+    only, and nothing can reach the store through the Storage API with an
+    unverifiable format any more.
+
+  TDD'd: `tests/storage_write_default_posture.rs` (new) asserts both halves
+  red-then-green, independently of each other (the format tests configure
+  an explicit trusted issuer, so they stay red for the format bug alone,
+  not carried by fix (a)) — including one test that spawns the **real
+  `identity-hub` binary** with no flags beyond `--bind`, so the shipped CLI
+  default is pinned, not a library-level stand-in for it — plus two
+  compatibility guards (an explicitly configured trusted issuer is still
+  accepted; both of the TCK's own JWT format labels are still accepted).
+  Fallout in three existing fixture files that booted `Config::for_test`
+  with an empty trusted-issuer allow-list and expected `200` on
+  `/credentials`/`/offers` (`storage_offer_auth.rs`, `si_token_validation.rs`,
+  `message_content_validation.rs`) was updated to opt in explicitly,
+  spawning the caller identity first and booting the service trusting that
+  identity's own DID — `trusted_issuer_allowlist.rs`/`dcp_tck.rs`/
+  `outbound_request_confinement.rs`/the nested-token and
+  presentation-scope files needed no change (verified, not assumed — see
+  each file's own module doc comment for why). `cargo test --workspace`
+  stayed fully green throughout. Real, measured effect on TCK conformance:
+  **54/54, unchanged**, confirmed against the real TCK, reproduced
+  identically three times — see "DCP TCK conformance snapshot"; like the
+  ninth and tenth changes, this fix closed real, TCK-invisible gaps, not
+  TCK regressions.
 - **Trusted-issuer allow-list check, added 2026-09-20 (sixth change
   today).** `verify_bearer_token` accepting any `iss` whose `did:web`
   document resolves and whose key verifies the token's signature (and is
@@ -747,7 +853,10 @@ including the first (wrong) fixes tried along the way).
   configuration convention already names as "the issuer"
   (`dataspacetck.did.issuer`, `BaseAssembly::parseDid`/`getIssuerDid`). Fixed
   by adding `Config::trusted_issuer_dids` (an explicit allow-list of caller
-  DIDs; empty means no restriction, this bootstrap's permissive default) and
+  DIDs; empty means no restriction, this bootstrap's permissive default —
+  **superseded 2026-09-20, eleventh change: an empty allow-list now denies
+  every issuer instead, see that entry below; the opt-in mechanism
+  described in the rest of this bullet is unchanged**) and
   a new `auth::check_trusted_issuer`, called by `storage_write` and
   `credential_offer` right after `verify_bearer_token`'s envelope checks
   pass — deliberately *not* folded into `verify_bearer_token` itself, since
@@ -810,9 +919,10 @@ including the first (wrong) fixes tried along the way).
     checks against. Closes `cs_06_05_01_credentialMessage_invalidStatus`.
   - `validation::check_known_holder_pid`, checked against the new
     `Config::known_holder_pids` (empty means no restriction, this
-    bootstrap's permissive default, the same posture
-    `Config::trusted_issuer_dids` already established), rejects a
-    `holderPid` this service wasn't configured to expect. Wired in
+    bootstrap's permissive default — deliberately unchanged by the
+    eleventh change below, which is scoped to `trusted_issuer_dids` and
+    credential format only; see that entry's note on `known_holder_pids`),
+    rejects a `holderPid` this service wasn't configured to expect. Wired in
     `tests/dcp.tck.properties`/`tests/dcp_tck.rs` to the TCK's own fixed
     `dataspacetck.credentials.correlation.id` (`BaseAssembly::getHolderPid`,
     decompiled to confirm). This bootstrap's Credential Service mode
@@ -830,7 +940,12 @@ including the first (wrong) fixes tried along the way).
     verify_jws_signature}`), not a reimplementation. A non-JWT-format
     container is left opaque and unverified, matching
     `identity_hub_graph::store`'s own stance on non-JWT payloads. Closes
-    `cs_06_05_02_credentialMessage_unverifiableProof`.
+    `cs_06_05_02_credentialMessage_unverifiableProof`. **Superseded
+    2026-09-20, eleventh change: leaving a non-JWT-format container
+    "opaque and unverified" turned out to mean *stored and later
+    resigned* by `handlers::build_presentation` — a signing oracle, not a
+    scope boundary. See that entry below; a format this service cannot
+    verify is now rejected outright instead of skipped.**
   - `validation::validate_offer_credentials` rejects an empty
     `CredentialOfferMessage.credentials` array outright, and — for a
     *sparse* (id-only, no `credentialType`) entry specifically — resolves
@@ -971,6 +1086,19 @@ repeatedly while building it, not just once at the end. Reproduced the
 identical 54/54 result three times after landing; did not change this
 table either.
 
+**Reconfirmed unchanged again after an eleventh, later change the same
+day** (see "What's simplified or stubbed"'s "Storage API deny-by-default
+posture plus a closed credential-format set" bullet): the same independent
+security audit's remaining HIGH finding — an empty `trusted_issuer_dids`
+meaning "trust everyone" instead of "trust nobody", and a non-`"jwt"`
+credential `format` skipping proof verification entirely and being stored
+unverified (a signing oracle via `handlers::build_presentation`) — was
+fixed without touching the real TCK's own explicit SUT configuration
+(`dataspacetck.did.issuer` was never empty, and every format label the TCK
+puts on the wire contains `"jwt"`, confirmed from `/app/tck-runtime.jar`,
+not guessed). Reproduced the identical 54/54 result three times after
+landing; did not change this table either.
+
 `tests/dcp_tck.rs`'s `dcp_tck_reports_full_credential_service_conformance`
 now asserts the TCK's own reported failure set is genuinely empty — not a
 count check, an assertion against the actual set of failing test method
@@ -1040,9 +1168,12 @@ message_content_validation` (the message-content/business-logic checks),
 `cargo test -p identity-hub-http --test
 nested_access_token_authentication` (the nested-token authentication
 check), `cargo test -p identity-hub-http --test nested_token_authorization`
-(the deny-by-default read authorization plus issuer-authority checks), and
+(the deny-by-default read authorization plus issuer-authority checks),
 `cargo test -p identity-hub-http --test outbound_request_confinement` (the
-outbound host allow-list plus timeout checks).
+outbound host allow-list plus timeout checks), and `cargo test -p
+identity-hub-http --test storage_write_default_posture` (the Storage API's
+deny-by-default trusted-issuer posture plus the closed credential-format
+set, including a real-binary-spawn regression guard).
 
 ## Continuous integration
 
@@ -1165,6 +1296,13 @@ ds-identity-hub-rs/
                                   checks (2026-09-20 security audit
                                   Findings 4, 5, 6 — real HTTP, no
                                   Docker/TCK needed).
+        storage_write_default_posture.rs
+                                  Storage API deny-by-default trusted-issuer
+                                  posture plus the closed credential-format
+                                  set, including a real-binary-spawn
+                                  regression guard (2026-09-20 security
+                                  audit, remaining HIGH finding — real HTTP,
+                                  no Docker/TCK needed).
   vendor/
     contreforts-core/      Git submodule (contreforts-ai/contreforts-core),
                             pinned to commit 95a4940 - the same commit
@@ -1187,9 +1325,13 @@ cargo test -p identity-hub-http --test dcp_tck -- --ignored --nocapture   # need
 ## Running it
 
 ```bash
-# Credential Service (VPP + CIP), default port 8080:
+# Credential Service (VPP + CIP), default port 8080. --trusted-issuer-did is
+# required (may be repeated) - an empty allow-list trusts nobody, so the
+# Storage API and Credential Offer API reject every write with 401 until at
+# least one is given (2026-09-20 fix, HIGH - see "What's simplified or
+# stubbed"'s "Storage API deny-by-default posture" entry):
 cargo run -p identity-hub-http --bin identity-hub -- credential-service \
-  --did-host localhost:8080
+  --did-host localhost:8080 --trusted-issuer-did did:web:some-issuer.example:issuer
 
 # Minimal Issuer Service (CIP only), a different port:
 cargo run -p identity-hub-http --bin identity-hub -- issuer-service \
@@ -1204,8 +1346,11 @@ embedded in its own `did:web` identity and advertised service endpoint (see
 to `true`, matching this bootstrap's local/test-only scope.
 `--trusted-issuer-did` (repeatable) populates `Config::trusted_issuer_dids`
 for a Credential Service's Storage/Offer APIs; omitted, it defaults to
-empty (no restriction configured) - see that field's doc comment for why
-that's this bootstrap's default rather than a recommendation.
-`--known-holder-pid` (repeatable) populates `Config::known_holder_pids` for
-the Storage API's `holderPid` check the same way; also empty by default -
-see that field's doc comment.
+empty, which (2026-09-20 fix, HIGH) means **no issuer is trusted** - the
+Storage API and Credential Offer API reject every write with `401` until at
+least one is given - see that field's doc comment. `--known-holder-pid`
+(repeatable) populates `Config::known_holder_pids` for the Storage API's
+`holderPid` check; that one is unrelated and stays empty-by-default
+permissive on purpose (out of scope for the 2026-09-20 fix - this bootstrap
+has no Credential-Request-tracking state to populate it from yet) - see
+that field's doc comment.

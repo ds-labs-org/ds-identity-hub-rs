@@ -18,6 +18,21 @@
 //! tiny stand-in server hosting one synthetic caller identity's `did:web`
 //! document, so `verify_bearer_token`'s DID resolution is a genuine HTTP
 //! round trip, not a mock.
+//!
+//! Since the 2026-09-20 fix for the "open write" default posture
+//! (`../../ARCHITECTURE.md`, "What's simplified or stubbed";
+//! `storage_write_default_posture.rs`), an empty `trusted_issuer_dids`
+//! means *no* issuer is trusted, not "no restriction configured" - so
+//! `spawn_credential_service` now takes the allow-list to boot with
+//! explicitly. Every rejection case below still passes an empty list: each
+//! one fails inside `verify_bearer_token` itself (missing/malformed
+//! header, expired token, wrong audience, bad signature), which runs
+//! *before* `check_trusted_issuer` is ever reached, so this file's
+//! rejection coverage is unaffected by that change. Only the two "genuinely
+//! valid token" regression guards - which must still get `200 OK` - spawn
+//! the caller identity first (this file's version of
+//! `trusted_issuer_allowlist.rs`'s ordering) and boot the service trusting
+//! that caller's DID.
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -31,17 +46,18 @@ use serde_json::{Value, json};
 use tokio::net::TcpListener;
 
 /// Boots this crate's real Credential Service (the system under test) on an
-/// ephemeral loopback port. Returns its shared state (so a test can inspect
-/// `store.all()` to confirm a rejected write never landed) and the base URL
-/// to send requests to.
-async fn spawn_credential_service() -> (Arc<AppState>, String) {
+/// ephemeral loopback port, with `trusted_issuer_dids` configured as given.
+/// Returns its shared state (so a test can inspect `store.all()` to confirm
+/// a rejected write never landed) and the base URL to send requests to.
+async fn spawn_credential_service(trusted_issuer_dids: Vec<String>) -> (Arc<AppState>, String) {
     let config = Config::for_test(
         Mode::CredentialService,
         SocketAddr::from(([127, 0, 0, 1], 0)),
         // Never resolved by any test here - no test exercises this
         // service's *own* DID document, only the caller-authorization path.
         "localhost:0",
-    );
+    )
+    .with_trusted_issuer_dids(trusted_issuer_dids);
     let (state, router) = identity_hub_http::build(config);
     let listener = TcpListener::bind("127.0.0.1:0")
         .await
@@ -165,7 +181,7 @@ async fn post_raw_auth(
 
 #[tokio::test]
 async fn storage_write_rejects_missing_auth_header() {
-    let (state, base) = spawn_credential_service().await;
+    let (state, base) = spawn_credential_service(Vec::new()).await;
     let response = post_raw_auth(
         &format!("{base}/credentials"),
         None,
@@ -182,7 +198,7 @@ async fn storage_write_rejects_missing_auth_header() {
 
 #[tokio::test]
 async fn storage_write_rejects_token_missing_bearer_prefix() {
-    let (state, base) = spawn_credential_service().await;
+    let (state, base) = spawn_credential_service(Vec::new()).await;
     let caller = spawn_caller_identity("issuer").await;
     let token = sign(
         &caller,
@@ -202,7 +218,7 @@ async fn storage_write_rejects_token_missing_bearer_prefix() {
 
 #[tokio::test]
 async fn storage_write_rejects_malformed_token() {
-    let (state, base) = spawn_credential_service().await;
+    let (state, base) = spawn_credential_service(Vec::new()).await;
     let response = post(
         &format!("{base}/credentials"),
         Some("not-a-real-jws-at-all"),
@@ -216,7 +232,7 @@ async fn storage_write_rejects_malformed_token() {
 
 #[tokio::test]
 async fn storage_write_rejects_expired_token() {
-    let (state, base) = spawn_credential_service().await;
+    let (state, base) = spawn_credential_service(Vec::new()).await;
     let caller = spawn_caller_identity("issuer").await;
     let now = dcp_core::now_secs();
     let payload = json!({
@@ -241,7 +257,7 @@ async fn storage_write_rejects_expired_token() {
 
 #[tokio::test]
 async fn storage_write_rejects_wrong_audience() {
-    let (state, base) = spawn_credential_service().await;
+    let (state, base) = spawn_credential_service(Vec::new()).await;
     let caller = spawn_caller_identity("issuer").await;
     let token = sign(
         &caller,
@@ -260,7 +276,7 @@ async fn storage_write_rejects_wrong_audience() {
 
 #[tokio::test]
 async fn storage_write_rejects_invalid_signature() {
-    let (state, base) = spawn_credential_service().await;
+    let (state, base) = spawn_credential_service(Vec::new()).await;
     let caller = spawn_caller_identity("issuer").await;
     // A completely different identity's key, but claiming to be `caller`
     // (same `iss`/`kid`) - the DID resolves to `caller`'s *real* public
@@ -290,8 +306,10 @@ async fn storage_write_accepts_a_genuinely_valid_token() {
     // Regression guard: real authorization must not break the legitimate
     // flow the real dcp-tck's own Credential-Service setup phase depends
     // on (see ../../ARCHITECTURE.md's "What's simplified or stubbed").
-    let (state, base) = spawn_credential_service().await;
+    // Caller identity spawned first so the service can be booted trusting
+    // its DID explicitly - see this file's module doc comment.
     let caller = spawn_caller_identity("issuer").await;
+    let (state, base) = spawn_credential_service(vec![caller.own_did().to_string()]).await;
     let token = sign(
         &caller,
         valid_payload(&caller, "did:web:localhost%3A0:credential-service"),
@@ -311,7 +329,7 @@ async fn storage_write_accepts_a_genuinely_valid_token() {
 
 #[tokio::test]
 async fn credential_offer_rejects_missing_auth_header() {
-    let (_state, base) = spawn_credential_service().await;
+    let (_state, base) = spawn_credential_service(Vec::new()).await;
     let response = post_raw_auth(
         &format!("{base}/offers"),
         None,
@@ -324,7 +342,7 @@ async fn credential_offer_rejects_missing_auth_header() {
 
 #[tokio::test]
 async fn credential_offer_rejects_token_missing_bearer_prefix() {
-    let (_state, base) = spawn_credential_service().await;
+    let (_state, base) = spawn_credential_service(Vec::new()).await;
     let caller = spawn_caller_identity("issuer").await;
     let token = sign(
         &caller,
@@ -342,7 +360,7 @@ async fn credential_offer_rejects_token_missing_bearer_prefix() {
 
 #[tokio::test]
 async fn credential_offer_rejects_malformed_token() {
-    let (_state, base) = spawn_credential_service().await;
+    let (_state, base) = spawn_credential_service(Vec::new()).await;
     let response = post(
         &format!("{base}/offers"),
         Some("garbage.not.jws"),
@@ -355,7 +373,7 @@ async fn credential_offer_rejects_malformed_token() {
 
 #[tokio::test]
 async fn credential_offer_rejects_expired_token() {
-    let (_state, base) = spawn_credential_service().await;
+    let (_state, base) = spawn_credential_service(Vec::new()).await;
     let caller = spawn_caller_identity("issuer").await;
     let now = dcp_core::now_secs();
     let payload = json!({
@@ -379,7 +397,7 @@ async fn credential_offer_rejects_expired_token() {
 
 #[tokio::test]
 async fn credential_offer_rejects_wrong_audience() {
-    let (_state, base) = spawn_credential_service().await;
+    let (_state, base) = spawn_credential_service(Vec::new()).await;
     let caller = spawn_caller_identity("issuer").await;
     let token = sign(
         &caller,
@@ -397,7 +415,7 @@ async fn credential_offer_rejects_wrong_audience() {
 
 #[tokio::test]
 async fn credential_offer_rejects_invalid_signature() {
-    let (_state, base) = spawn_credential_service().await;
+    let (_state, base) = spawn_credential_service(Vec::new()).await;
     let caller = spawn_caller_identity("issuer").await;
     let wrong_key_holder = ServiceIdentity::new("attacker-host:1", "attacker");
     let payload = valid_payload(&caller, "did:web:localhost%3A0:credential-service");
@@ -418,8 +436,10 @@ async fn credential_offer_rejects_invalid_signature() {
 
 #[tokio::test]
 async fn credential_offer_accepts_a_genuinely_valid_token() {
-    let (_state, base) = spawn_credential_service().await;
+    // Caller identity spawned first so the service can be booted trusting
+    // its DID explicitly - see this file's module doc comment.
     let caller = spawn_caller_identity("issuer").await;
+    let (_state, base) = spawn_credential_service(vec![caller.own_did().to_string()]).await;
     let token = sign(
         &caller,
         valid_payload(&caller, "did:web:localhost%3A0:credential-service"),

@@ -17,6 +17,18 @@
 //! rejection case below returned `200 OK`), then again after adding each
 //! (green). Same real-HTTP, real-ES256, no-TCK/Docker-dependency harness
 //! `storage_offer_auth.rs`/`trusted_issuer_allowlist.rs` established.
+//!
+//! Since the 2026-09-20 fix for the "open write" default posture
+//! (`../../ARCHITECTURE.md`, "What's simplified or stubbed";
+//! `storage_write_default_posture.rs`), an empty `trusted_issuer_dids`
+//! means *no* issuer is trusted, and `check_trusted_issuer` runs (on both
+//! `storage_write` and `credential_offer`) before any of the
+//! message-content checks this file is actually about ever get a chance to
+//! run. So every fixture below now spawns its caller/issuer identity
+//! *first* and boots the service explicitly trusting that identity's DID
+//! (`storage_offer_auth.rs`'s ordering) - configuring an issuer here is not
+//! this file's own subject, it is what makes the Storage/Offer APIs
+//! reachable at all so the six content checks can be exercised.
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -34,15 +46,20 @@ const AUD: &str = "did:web:localhost%3A0:credential-service";
 const KNOWN_HOLDER_PID: &str = "known-holder-pid";
 
 /// Boots this crate's real Credential Service (the system under test),
-/// configured to expect [`KNOWN_HOLDER_PID`] on the Storage API - see
-/// `Config::known_holder_pids`.
-async fn spawn_credential_service() -> (Arc<AppState>, String) {
+/// configured to expect [`KNOWN_HOLDER_PID`] on the Storage API (see
+/// `Config::known_holder_pids`) and to trust `trusted_issuer_dids` (see
+/// `Config::trusted_issuer_dids`) - since the 2026-09-20 default-posture
+/// fix, every caller this file exercises must be explicitly trusted or
+/// `check_trusted_issuer` rejects it before any message-content check
+/// below ever runs.
+async fn spawn_credential_service(trusted_issuer_dids: Vec<String>) -> (Arc<AppState>, String) {
     let config = Config::for_test(
         Mode::CredentialService,
         SocketAddr::from(([127, 0, 0, 1], 0)),
         "localhost:0",
     )
-    .with_known_holder_pids(vec![KNOWN_HOLDER_PID.to_string()]);
+    .with_known_holder_pids(vec![KNOWN_HOLDER_PID.to_string()])
+    .with_trusted_issuer_dids(trusted_issuer_dids);
     let (state, router) = identity_hub_http::build(config);
     let listener = TcpListener::bind("127.0.0.1:0")
         .await
@@ -252,8 +269,8 @@ async fn post(url: &str, bearer: &str, body: &Value) -> reqwest::Result<reqwest:
 
 #[tokio::test]
 async fn storage_write_rejects_a_credential_message_missing_a_required_field() {
-    let (_state, base) = spawn_credential_service().await;
     let caller = spawn_caller_identity("issuer").await;
+    let (_state, base) = spawn_credential_service(vec![caller.own_did().to_string()]).await;
     let token = bearer_token(&caller);
     for missing in ["@context", "type", "issuerPid", "holderPid", "status"] {
         let mut body = credential_message_body(KNOWN_HOLDER_PID, "ISSUED", vec![]);
@@ -273,8 +290,8 @@ async fn storage_write_rejects_a_credential_message_missing_a_required_field() {
 
 #[tokio::test]
 async fn storage_write_rejects_an_invalid_status_value() {
-    let (state, base) = spawn_credential_service().await;
     let caller = spawn_caller_identity("issuer").await;
+    let (state, base) = spawn_credential_service(vec![caller.own_did().to_string()]).await;
     let token = bearer_token(&caller);
     let body = credential_message_body(KNOWN_HOLDER_PID, "INVALID_STATUS", vec![]);
     let response = post(&format!("{base}/credentials"), &token, &body)
@@ -286,8 +303,8 @@ async fn storage_write_rejects_an_invalid_status_value() {
 
 #[tokio::test]
 async fn storage_write_accepts_the_recognized_status_values() {
-    let (state, base) = spawn_credential_service().await;
     let caller = spawn_caller_identity("issuer").await;
+    let (state, base) = spawn_credential_service(vec![caller.own_did().to_string()]).await;
     for status in ["ISSUED", "REJECTED"] {
         let token = bearer_token(&caller);
         let body = credential_message_body(KNOWN_HOLDER_PID, status, vec![]);
@@ -303,8 +320,8 @@ async fn storage_write_accepts_the_recognized_status_values() {
 
 #[tokio::test]
 async fn storage_write_rejects_an_unknown_holder_pid() {
-    let (state, base) = spawn_credential_service().await;
     let caller = spawn_caller_identity("issuer").await;
+    let (state, base) = spawn_credential_service(vec![caller.own_did().to_string()]).await;
     let token = bearer_token(&caller);
     let body = credential_message_body("some-other-holder-pid", "ISSUED", vec![]);
     let response = post(&format!("{base}/credentials"), &token, &body)
@@ -316,8 +333,8 @@ async fn storage_write_rejects_an_unknown_holder_pid() {
 
 #[tokio::test]
 async fn storage_write_accepts_a_known_holder_pid() {
-    let (state, base) = spawn_credential_service().await;
     let caller = spawn_caller_identity("issuer").await;
+    let (state, base) = spawn_credential_service(vec![caller.own_did().to_string()]).await;
     let token = bearer_token(&caller);
     let body = credential_message_body(KNOWN_HOLDER_PID, "ISSUED", vec![]);
     let response = post(&format!("{base}/credentials"), &token, &body)
@@ -331,9 +348,9 @@ async fn storage_write_accepts_a_known_holder_pid() {
 
 #[tokio::test]
 async fn storage_write_rejects_a_credential_with_an_unverifiable_proof() {
-    let (state, base) = spawn_credential_service().await;
     let caller = spawn_caller_identity("issuer").await;
     let attacker = spawn_caller_identity("attacker").await;
+    let (state, base) = spawn_credential_service(vec![caller.own_did().to_string()]).await;
     let token = bearer_token(&caller);
     let forged = forged_credential_container(
         "MembershipCredential",
@@ -351,8 +368,8 @@ async fn storage_write_rejects_a_credential_with_an_unverifiable_proof() {
 
 #[tokio::test]
 async fn storage_write_accepts_credentials_with_genuinely_verifiable_proofs() {
-    let (state, base) = spawn_credential_service().await;
     let caller = spawn_caller_identity("issuer").await;
+    let (state, base) = spawn_credential_service(vec![caller.own_did().to_string()]).await;
     let token = bearer_token(&caller);
     let genuine = genuine_credential_container(
         "MembershipCredential",
@@ -394,8 +411,8 @@ fn sparse_offer_body(issuer_did: &str, ids: &[&str]) -> Value {
 
 #[tokio::test]
 async fn credential_offer_rejects_an_empty_credentials_array() {
-    let (_state, base) = spawn_credential_service().await;
     let caller = spawn_caller_identity("issuer").await;
+    let (_state, base) = spawn_credential_service(vec![caller.own_did().to_string()]).await;
     let token = bearer_token(&caller);
     let response = post(
         &format!("{base}/offers"),
@@ -412,8 +429,8 @@ async fn credential_offer_accepts_a_full_credential_object_without_a_catalog_loo
     // Regression guard: a full (non-sparse) CredentialObject is
     // self-describing and must not require - or be rejected for lacking -
     // a resolvable catalog, even when its id is made up.
-    let (_state, base) = spawn_credential_service().await;
     let caller = spawn_caller_identity("issuer").await;
+    let (_state, base) = spawn_credential_service(vec![caller.own_did().to_string()]).await;
     let token = bearer_token(&caller);
     let response = post(
         &format!("{base}/offers"),
@@ -429,8 +446,8 @@ async fn credential_offer_accepts_a_full_credential_object_without_a_catalog_loo
 
 #[tokio::test]
 async fn credential_offer_rejects_a_sparse_offer_with_unrecognized_ids() {
-    let (_state, base) = spawn_credential_service().await;
     let issuer = spawn_issuer_identity_with_catalog("issuer", &["real-credential-id"]).await;
+    let (_state, base) = spawn_credential_service(vec![issuer.own_did().to_string()]).await;
     let token = bearer_token(&issuer);
     let response = post(
         &format!("{base}/offers"),
@@ -444,8 +461,8 @@ async fn credential_offer_rejects_a_sparse_offer_with_unrecognized_ids() {
 
 #[tokio::test]
 async fn credential_offer_accepts_a_sparse_offer_with_catalog_known_ids() {
-    let (_state, base) = spawn_credential_service().await;
     let issuer = spawn_issuer_identity_with_catalog("issuer", &["real-credential-id"]).await;
+    let (_state, base) = spawn_credential_service(vec![issuer.own_did().to_string()]).await;
     let token = bearer_token(&issuer);
     let response = post(
         &format!("{base}/offers"),

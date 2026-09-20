@@ -49,9 +49,10 @@ struct CommonArgs {
     insecure_http: bool,
     /// A DID trusted to deliver a `CredentialMessage`/`CredentialOfferMessage`
     /// to this Credential Service (may be repeated). Empty (the default)
-    /// means no restriction is configured - see `Config::trusted_issuer_dids`'s
-    /// doc comment for why that's this bootstrap's default, not a
-    /// recommendation for a real deployment.
+    /// means NO issuer is trusted - the Storage API and Credential Offer
+    /// API reject every write with 401 until at least one of these is
+    /// given (2026-09-20 fix, HIGH; see `Config::trusted_issuer_dids`'s doc
+    /// comment).
     #[arg(long = "trusted-issuer-did")]
     trusted_issuer_dids: Vec<String>,
     /// A `holderPid` this Credential Service should accept on the Storage
@@ -112,6 +113,21 @@ async fn main() {
         did_host = %config.did_host,
         "starting ds-identity-hub-rs"
     );
+
+    // 2026-09-20 fix (HIGH): an empty trusted-issuer allow-list now means
+    // "trust nobody", not "no restriction" - see
+    // `Config::trusted_issuer_dids`'s doc comment. Booting still succeeds
+    // (a real deployment may legitimately add its first `--trusted-issuer-did`
+    // after standing the process up), but an operator who forgot the flag
+    // entirely should find out from the logs, not from every write silently
+    // getting 401.
+    if config.mode == Mode::CredentialService && config.trusted_issuer_dids.is_empty() {
+        tracing::warn!(
+            "no --trusted-issuer-did configured: the Storage API (POST /credentials) and \
+             Credential Offer API (POST /offers) will reject every write with 401 until at \
+             least one is given"
+        );
+    }
 
     let (state, router) = build(config.clone());
 

@@ -331,11 +331,14 @@ fn build_presentation(
 /// `nbf`, `iat`, `capabilityInvocation`, and `jti` replay are all real
 /// checks now too. On top of that envelope validation, the caller's `iss`
 /// must also be on `state.config.trusted_issuer_dids`
-/// (`crate::auth::check_trusted_issuer`) when that list is non-empty - a
-/// genuinely valid, correctly self-signed token from an unrelated but
-/// otherwise-legitimate DID is still not this service's issuer. The nested
-/// `token` claim's own signature/binding is not checked here - see the same
-/// section for exactly what remains and why.
+/// (`crate::auth::check_trusted_issuer`) - a genuinely valid, correctly
+/// self-signed token from an unrelated but otherwise-legitimate DID is
+/// still not this service's issuer, and (2026-09-20 fix, HIGH) an *empty*
+/// `trusted_issuer_dids` now denies every caller rather than none, so a
+/// deployment must opt a real issuer in with `--trusted-issuer-did` before
+/// this endpoint accepts anything. The nested `token` claim's own
+/// signature/binding is not checked here - see the same section for
+/// exactly what remains and why.
 ///
 /// Once the token envelope and issuer are both trusted, the message *body*
 /// itself is validated too (`crate::validation`, added 2026-09-20): `status`

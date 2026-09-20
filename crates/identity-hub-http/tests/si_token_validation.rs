@@ -12,6 +12,16 @@
 //! `storage_offer_auth.rs` established (real `did:web` resolution, real
 //! ES256 signatures, no TCK/Docker dependency) - see that file's module
 //! doc comment for the full rationale, unchanged here.
+//!
+//! Since the 2026-09-20 fix for the "open write" default posture
+//! (`../../ARCHITECTURE.md`, "What's simplified or stubbed";
+//! `storage_write_default_posture.rs`), an empty `trusted_issuer_dids`
+//! means *no* issuer is trusted - so `spawn_credential_service` now takes
+//! the allow-list to boot with explicitly. The rejection cases below still
+//! pass an empty list (each fails inside `verify_bearer_token` itself,
+//! before `check_trusted_issuer` is ever reached); the "accepts"/regression
+//! guards spawn the caller identity first and boot the service trusting
+//! that caller's DID (`storage_offer_auth.rs`'s ordering).
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -27,12 +37,13 @@ use tokio::net::TcpListener;
 /// Boots this crate's real Credential Service (the system under test) on an
 /// ephemeral loopback port - identical to `storage_offer_auth.rs`'s helper
 /// of the same shape.
-async fn spawn_credential_service() -> (Arc<AppState>, String) {
+async fn spawn_credential_service(trusted_issuer_dids: Vec<String>) -> (Arc<AppState>, String) {
     let config = Config::for_test(
         Mode::CredentialService,
         SocketAddr::from(([127, 0, 0, 1], 0)),
         "localhost:0",
-    );
+    )
+    .with_trusted_issuer_dids(trusted_issuer_dids);
     let (state, router) = identity_hub_http::build(config);
     let listener = TcpListener::bind("127.0.0.1:0")
         .await
@@ -119,7 +130,7 @@ const AUD: &str = "did:web:localhost%3A0:credential-service";
 
 #[tokio::test]
 async fn storage_write_rejects_token_whose_sub_does_not_match_iss() {
-    let (state, base) = spawn_credential_service().await;
+    let (state, base) = spawn_credential_service(Vec::new()).await;
     let caller = spawn_caller_identity("issuer").await;
     let now = dcp_core::now_secs();
     // A well-formed, correctly-signed, correctly-audienced token - the only
@@ -153,7 +164,7 @@ async fn storage_write_rejects_token_whose_sub_does_not_match_iss() {
 
 #[tokio::test]
 async fn storage_write_rejects_token_with_no_sub_claim_at_all() {
-    let (state, base) = spawn_credential_service().await;
+    let (state, base) = spawn_credential_service(Vec::new()).await;
     let caller = spawn_caller_identity("issuer").await;
     let now = dcp_core::now_secs();
     let payload = json!({
@@ -180,7 +191,7 @@ async fn storage_write_rejects_token_with_no_sub_claim_at_all() {
 
 #[tokio::test]
 async fn storage_write_rejects_token_not_yet_valid() {
-    let (state, base) = spawn_credential_service().await;
+    let (state, base) = spawn_credential_service(Vec::new()).await;
     let caller = spawn_caller_identity("issuer").await;
     let now = dcp_core::now_secs();
     let payload = json!({
@@ -208,7 +219,7 @@ async fn storage_write_rejects_token_not_yet_valid() {
 
 #[tokio::test]
 async fn storage_write_rejects_token_with_iat_in_the_future() {
-    let (state, base) = spawn_credential_service().await;
+    let (state, base) = spawn_credential_service(Vec::new()).await;
     let caller = spawn_caller_identity("issuer").await;
     let now = dcp_core::now_secs();
     // Otherwise entirely well-formed (iss==sub, nbf valid, not expired) -
@@ -243,8 +254,8 @@ async fn storage_write_accepts_a_token_with_iat_within_clock_skew_leeway() {
     // Regression guard: the same clock-skew leeway nbf already tolerates
     // must also apply to iat, so an ordinary, legitimately-clocked caller a
     // few seconds ahead of this process is not rejected.
-    let (state, base) = spawn_credential_service().await;
     let caller = spawn_caller_identity("issuer").await;
+    let (state, base) = spawn_credential_service(vec![caller.own_did().to_string()]).await;
     let now = dcp_core::now_secs();
     let payload = json!({
         "iss": caller.own_did(),
@@ -271,7 +282,7 @@ async fn storage_write_accepts_a_token_with_iat_within_clock_skew_leeway() {
 
 #[tokio::test]
 async fn storage_write_rejects_a_key_not_listed_under_capability_invocation() {
-    let (state, base) = spawn_credential_service().await;
+    let (state, base) = spawn_credential_service(Vec::new()).await;
     // A caller whose DID document has a real, otherwise-valid
     // verificationMethod (the signature genuinely verifies against it), but
     // that key is deliberately absent from capabilityInvocation - the DCP
@@ -309,8 +320,8 @@ async fn storage_write_accepts_a_key_that_is_listed_under_capability_invocation(
     // Regression guard: ServiceIdentity::did_document always lists its own
     // key under capabilityInvocation, so the ordinary, legitimate path must
     // keep working once this check exists.
-    let (state, base) = spawn_credential_service().await;
     let caller = spawn_caller_identity("issuer").await;
+    let (state, base) = spawn_credential_service(vec![caller.own_did().to_string()]).await;
     let now = dcp_core::now_secs();
     let payload = json!({
         "iss": caller.own_did(),
@@ -337,8 +348,8 @@ async fn storage_write_accepts_a_key_that_is_listed_under_capability_invocation(
 
 #[tokio::test]
 async fn storage_write_rejects_a_reused_jti() {
-    let (state, base) = spawn_credential_service().await;
     let caller = spawn_caller_identity("issuer").await;
+    let (state, base) = spawn_credential_service(vec![caller.own_did().to_string()]).await;
     let now = dcp_core::now_secs();
     let jti = uuid::Uuid::new_v4().to_string();
     let payload = json!({
@@ -389,8 +400,8 @@ async fn storage_write_rejects_a_reused_jti() {
 async fn storage_write_accepts_two_calls_with_distinct_jtis() {
     // Regression guard: jti tracking must key on the jti value itself, not
     // reject a second call from the same caller outright.
-    let (state, base) = spawn_credential_service().await;
     let caller = spawn_caller_identity("issuer").await;
+    let (state, base) = spawn_credential_service(vec![caller.own_did().to_string()]).await;
     let now = dcp_core::now_secs();
     let make_token = || {
         sign(

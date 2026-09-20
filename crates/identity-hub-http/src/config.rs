@@ -56,12 +56,20 @@ pub struct Config {
     /// distinct from (and enforced after) `verify_bearer_token`'s signature/
     /// envelope checks, which only prove a token's `iss` really signed it,
     /// not that this service has any reason to trust that `iss` as *the*
-    /// issuer. Empty means no restriction is configured - this bootstrap's
-    /// permissive default (see `crate::handlers::storage_write`'s doc
-    /// comment and `../../ARCHITECTURE.md`'s "What's simplified or
-    /// stubbed"), not a claim that an empty list is a safe default for a
-    /// real deployment. A small explicit list is sufficient for this
-    /// bootstrap's scope rather than a full trust-registry integration.
+    /// issuer.
+    ///
+    /// **Deny by default**: empty means no issuer is trusted, so a service
+    /// booted with no `--trusted-issuer-did` at all rejects every Storage
+    /// API/Credential Offer API write with `401` (2026-09-20 independent
+    /// security audit, HIGH - see `crate::auth::check_trusted_issuer`'s doc
+    /// comment, `crate::handlers::storage_write`'s doc comment, and
+    /// `../../ARCHITECTURE.md`'s "What's simplified or stubbed"). The
+    /// opt-in is `--trusted-issuer-did` (repeatable) /
+    /// [`Config::with_trusted_issuer_dids`] / the real
+    /// `eclipse-dataspacetck/dcp-tck`'s own `dataspacetck.did.issuer`
+    /// SUT-configuration property. A small explicit list is sufficient for
+    /// this bootstrap's scope rather than a full trust-registry
+    /// integration.
     ///
     /// Wired to the real `eclipse-dataspacetck/dcp-tck`'s own SUT
     /// convention for exactly this signal: `dataspacetck.did.issuer`
