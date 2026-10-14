@@ -341,7 +341,7 @@ async fn holder_by_did(hub: &Hub, did: &str) -> Value {
 #[tokio::test]
 async fn admin_requests_need_the_admin_bearer_token() {
     let hub = spawn_hub(HolderApproval::Auto).await;
-    let url = format!("{}", hub.admin);
+    let url = hub.admin.clone();
 
     let missing = hub.client.get(&url).send().await.unwrap();
     assert_eq!(missing.status(), StatusCode::UNAUTHORIZED);

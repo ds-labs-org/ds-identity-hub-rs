@@ -44,7 +44,7 @@ p256 = { version = "0.13", features = ["ecdsa", "pem"] }
 rand = "0.8"
 base64 = "0.22"
 regex = "1"
-clap = { version = "4", features = ["derive"] }
+clap = { version = "4", features = ["derive", "env"] }
 # gzip for the StatusList2021 bitstring served by the Issuer Service.
 flate2 = "1"
 

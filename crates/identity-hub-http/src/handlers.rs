@@ -12,9 +12,9 @@ use uuid::Uuid;
 
 use dcp_core::{now_secs, service_endpoint_url, sign_jws};
 use identity_hub_core::messages::{
-    CredentialContainer, CredentialMessage, CredentialOfferMessage, CredentialRequestMessage,
-    CredentialStatus, IssuerMetadata, PresentationQueryMessage, PresentationResponseMessage,
-    VC_CONTEXT,
+    CredentialContainer, CredentialMessage, CredentialObject, CredentialOfferMessage,
+    CredentialRequestMessage, CredentialStatus, IssuerMetadata, PresentationQueryMessage,
+    PresentationResponseMessage, VC_CONTEXT,
 };
 use identity_hub_core::store::StoredCredentialBatch;
 use identity_hub_core::sts::{self, StsTokenRequest};
@@ -22,8 +22,12 @@ use identity_hub_core::sts::{self, StsTokenRequest};
 use crate::auth::{
     AuthError, check_trusted_issuer, verify_bearer_token, verify_nested_access_token,
 };
-use crate::config::Mode;
-use crate::state::{AppState, RequestRecord};
+use crate::config::{HolderApproval, Mode};
+use crate::issuer::{
+    CredentialDefinition, CredentialRecordStatus, Holder, HolderStatus, IssuanceProcess,
+    IssuedCredential, ProcessState, STATUS_LIST_CONTEXT, STATUS_LIST_PATH,
+};
+use crate::state::AppState;
 use crate::validation::{
     ValidationError, check_known_holder_pid, validate_offer_credentials, validate_status,
     verify_credential_proofs,
@@ -42,7 +46,8 @@ pub fn router(state: Arc<AppState>) -> Router {
         Mode::IssuerService => router
             .route("/credentials", post(credential_request))
             .route("/requests/{id}", get(request_status))
-            .route("/metadata", get(issuer_metadata)),
+            .route("/metadata", get(issuer_metadata))
+            .route(STATUS_LIST_PATH, get(status_list)),
     };
     // OID4VCI runs side by side with DCP on the same process: the Issuer
     // Service is also an OID4VCI Credential Issuer, the Credential Service
@@ -468,6 +473,20 @@ async fn credential_offer(
 
 /// `POST /credentials` on an Issuer Service (the Credential Request API).
 /// See `credential.issuance.protocol.md#credential-request-api`.
+///
+/// On top of the token checks, the request is governed by the Issuer Admin
+/// API's state (`crate::issuer`, contract section 1):
+/// - every `credentials[].id` must name a definition in the catalog (`400`);
+/// - the caller's DID is looked up in the holder registry: a `rejected`
+///   holder is refused `403` with no process created; an unknown DID gets a
+///   holder record, `approved` or `pending` per `--holder-approval`, or
+///   `503` if the registry is full;
+/// - the issuance process starts `APPROVED` (delivery spawned now) for an
+///   approved holder, `SUBMITTED` (waits for the operator) otherwise.
+///
+/// With the default `--holder-approval auto` every first-time caller is
+/// approved on the spot, which is exactly the pre-catalog behaviour the DCP
+/// TCK was run against.
 async fn credential_request(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -495,111 +514,217 @@ async fn credential_request(
         .and_then(Value::as_str)
         .map(|s| s.to_string());
 
-    let known_id = &state.supported_credential.id;
-    if message.credentials.is_empty() || !message.credentials.iter().all(|c| &c.id == known_id) {
-        return (
-            StatusCode::BAD_REQUEST,
-            format!("unknown credential id: only '{known_id}' is supported by this bootstrap"),
-        )
-            .into_response();
+    let now = now_secs();
+    let process_id = Uuid::new_v4().to_string();
+    // Lock order: definitions -> holders -> requests (see `crate::issuer`).
+    // All three are held together so a concurrent definition delete or
+    // holder approval can never miss this process.
+    let deliver_now = {
+        let definitions = state.definitions.lock().expect("definitions lock poisoned");
+        if message.credentials.is_empty() {
+            return (StatusCode::BAD_REQUEST, "credentials must not be empty").into_response();
+        }
+        if let Some(unknown) = message
+            .credentials
+            .iter()
+            .find(|c| definitions.get(&c.id).is_none())
+        {
+            return (
+                StatusCode::BAD_REQUEST,
+                format!("unknown credential id: '{}'", unknown.id),
+            )
+                .into_response();
+        }
+        let mut holders = state.holders.lock().expect("holders lock poisoned");
+        let holder = match holders.by_did(&holder_did) {
+            Some(holder) => holder.clone(),
+            None => {
+                let status = match state.config.holder_approval {
+                    HolderApproval::Auto => HolderStatus::Approved,
+                    HolderApproval::Manual => HolderStatus::Pending,
+                };
+                let new_holder = Holder {
+                    holder_id: Uuid::new_v4().to_string(),
+                    did: holder_did.clone(),
+                    name: None,
+                    properties: Default::default(),
+                    status,
+                    created_at: now,
+                };
+                match holders.insert(new_holder) {
+                    Ok(holder) => holder,
+                    Err(err) => {
+                        tracing::warn!(?err, "refusing credential request: holder registry full");
+                        return (StatusCode::SERVICE_UNAVAILABLE, "holder registry is full")
+                            .into_response();
+                    }
+                }
+            }
+        };
+        let process_state = match holder.status {
+            HolderStatus::Rejected => {
+                return (
+                    StatusCode::FORBIDDEN,
+                    "holder has been rejected by this issuer",
+                )
+                    .into_response();
+            }
+            HolderStatus::Pending => ProcessState::Submitted,
+            HolderStatus::Approved => ProcessState::Approved,
+        };
+        state
+            .requests
+            .lock()
+            .expect("requests lock poisoned")
+            .insert(
+                process_id.clone(),
+                IssuanceProcess {
+                    id: process_id.clone(),
+                    state: process_state,
+                    holder_id: holder.holder_id,
+                    holder_did,
+                    holder_pid: message.holder_pid.clone(),
+                    credential_definitions: message
+                        .credentials
+                        .iter()
+                        .map(|c| c.id.clone())
+                        .collect(),
+                    error_detail: None,
+                    created_at: now,
+                    state_timestamp: now,
+                    delivery_bearer,
+                },
+            );
+        process_state == ProcessState::Approved
+    };
+
+    if deliver_now {
+        spawn_delivery(state.clone(), process_id.clone());
     }
-
-    let request_id = Uuid::new_v4().to_string();
-    state
-        .requests
-        .lock()
-        .expect("requests lock poisoned")
-        .insert(
-            request_id.clone(),
-            RequestRecord {
-                issuer_pid: request_id.clone(),
-                holder_pid: message.holder_pid.clone(),
-                status: "RECEIVED".to_string(),
-            },
-        );
-
-    let state = state.clone();
-    let holder_pid = message.holder_pid.clone();
-    let req_id_for_task = request_id.clone();
-    tokio::spawn(async move {
-        deliver_issued_credential(
-            state,
-            req_id_for_task,
-            holder_pid,
-            holder_did,
-            delivery_bearer,
-        )
-        .await;
-    });
 
     let mut response = StatusCode::CREATED.into_response();
     response.headers_mut().insert(
         header::LOCATION,
-        format!("/requests/{request_id}")
+        format!("/requests/{process_id}")
             .parse()
             .expect("request id is a valid header value"),
     );
     response
 }
 
-/// The asynchronous half of the Credential Request API: resolves the
-/// holder's own `did:web` document to find its `CredentialService`
-/// endpoint, mints a self-issued token addressed to it, signs a real VC for
-/// this bootstrap's one supported credential type, and delivers it via the
-/// Storage API - see `credential.issuance.protocol.md`, step 7 of the
-/// Issuance Flow.
-async fn deliver_issued_credential(
-    state: Arc<AppState>,
-    request_id: String,
+/// Starts the asynchronous delivery of an `APPROVED` issuance process - from
+/// the Credential Request API for an already-approved holder, or from the
+/// admin API's holder approval for every process that was waiting on it.
+pub(crate) fn spawn_delivery(state: Arc<AppState>, process_id: String) {
+    tokio::spawn(async move {
+        deliver_issued_credential(state, process_id).await;
+    });
+}
+
+/// What a delivery needs from its process record, copied out so no lock is
+/// held across the network calls.
+struct DeliveryJob {
+    process_id: String,
+    holder_id: String,
     holder_pid: String,
     holder_did: String,
     delivery_bearer: Option<String>,
-) {
+    definitions: Vec<CredentialDefinition>,
+}
+
+/// The asynchronous half of the Credential Request API: resolves the
+/// holder's own `did:web` document to find its `CredentialService`
+/// endpoint, mints a self-issued token addressed to it, signs one real VC
+/// per requested credential definition, and delivers them via the Storage
+/// API - see `credential.issuance.protocol.md`, step 7 of the Issuance
+/// Flow. Success records an issued-credential entry per VC and moves the
+/// process to `DELIVERED`; any failure moves it to `ERRORED` with the reason
+/// in `errorDetail`.
+async fn deliver_issued_credential(state: Arc<AppState>, process_id: String) {
     // Caps how many delivery tasks are doing outbound network I/O at once
     // (`AppState::delivery_semaphore`, `state::MAX_IN_FLIGHT_DELIVERIES`) -
     // acquired here, inside the spawned task, never on the request path, so
-    // the Credential Request API's own `201 Created` response is never
-    // delayed or refused by this. See `../../ARCHITECTURE.md`, "What's
-    // simplified or stubbed" (2026-09-20 independent security audit,
-    // MEDIUM).
+    // the Credential Request API's own `201 Created` response (and the
+    // admin API's approve response) is never delayed or refused by this.
+    // See `../../ARCHITECTURE.md`, "What's simplified or stubbed"
+    // (2026-09-20 independent security audit, MEDIUM).
     let _permit = state
         .delivery_semaphore
         .acquire()
         .await
         .expect("delivery_semaphore is never closed");
-    let outcome = try_deliver_issued_credential(
-        &state,
-        &request_id,
-        &holder_pid,
-        &holder_did,
-        delivery_bearer,
-    )
-    .await;
-    let status = if outcome.is_ok() {
-        "ISSUED"
-    } else {
-        "REJECTED"
+
+    let Some(process) = state
+        .requests
+        .lock()
+        .expect("requests lock poisoned")
+        .get(&process_id)
+        .cloned()
+    else {
+        // Evicted from the bounded table before delivery started.
+        return;
     };
-    if let Err(err) = &outcome {
-        tracing::warn!(request_id, error = %err, "failed to deliver issued credential");
-    }
+    let definitions: Result<Vec<CredentialDefinition>, String> = {
+        let catalog = state.definitions.lock().expect("definitions lock poisoned");
+        process
+            .credential_definitions
+            .iter()
+            .map(|id| {
+                catalog
+                    .get(id)
+                    .cloned()
+                    .ok_or_else(|| format!("credential definition '{id}' no longer exists"))
+            })
+            .collect()
+    };
+    let outcome = match definitions {
+        Ok(definitions) => {
+            try_deliver_issued_credential(
+                &state,
+                DeliveryJob {
+                    process_id: process.id.clone(),
+                    holder_id: process.holder_id.clone(),
+                    holder_pid: process.holder_pid.clone(),
+                    holder_did: process.holder_did.clone(),
+                    delivery_bearer: process.delivery_bearer.clone(),
+                    definitions,
+                },
+            )
+            .await
+        }
+        Err(err) => Err(err),
+    };
+
+    let now = now_secs();
+    let (process_state, error_detail) = match outcome {
+        Ok(records) => {
+            let mut issued = state.issued.lock().expect("issued lock poisoned");
+            for record in records {
+                issued.insert(record);
+            }
+            (ProcessState::Delivered, None)
+        }
+        Err(err) => {
+            tracing::warn!(process_id, error = %err, "failed to deliver issued credential");
+            (ProcessState::Errored, Some(err))
+        }
+    };
     if let Some(record) = state
         .requests
         .lock()
         .expect("requests lock poisoned")
-        .get_mut(&request_id)
+        .get_mut(&process_id)
     {
-        record.status = status.to_string();
+        record.transition(process_state, now);
+        record.error_detail = error_detail;
     }
 }
 
 async fn try_deliver_issued_credential(
     state: &AppState,
-    request_id: &str,
-    holder_pid: &str,
-    holder_did: &str,
-    delivery_bearer: Option<String>,
-) -> Result<(), String> {
+    job: DeliveryJob,
+) -> Result<Vec<IssuedCredential>, String> {
+    let holder_did = job.holder_did.as_str();
     // 2026-09-20 independent security audit, Finding 5 (HIGH): the holder's
     // own DID is a value this service was itself asked to resolve as part
     // of the Credential Request flow, but resolving it is still an
@@ -620,25 +745,46 @@ async fn try_deliver_issued_credential(
         .check_url(&endpoint)
         .map_err(|e| e.to_string())?;
 
-    let now = now_secs();
-    let vc_jws = mint_supported_credential(state, holder_did);
+    let mut containers = Vec::with_capacity(job.definitions.len());
+    let mut records = Vec::with_capacity(job.definitions.len());
+    for definition in &job.definitions {
+        let index = state
+            .issued
+            .lock()
+            .expect("issued lock poisoned")
+            .status_list
+            .allocate()
+            .ok_or(
+                "the revocation status list is exhausted; no further credentials can be issued",
+            )?;
+        let minted = mint_credential(state, definition, holder_did, Some(index));
+        containers.push(CredentialContainer {
+            credential_type: definition.credential_type.clone(),
+            payload: json!(minted.jws),
+            format: "jwt".to_string(),
+        });
+        records.push(IssuedCredential {
+            id: minted.id,
+            credential_type: definition.credential_type.clone(),
+            credential_definition_id: definition.id.clone(),
+            holder_id: job.holder_id.clone(),
+            holder_did: holder_did.to_string(),
+            issuance_process_id: job.process_id.clone(),
+            format: definition.format.clone(),
+            issued_at: minted.issued_at,
+            expires_at: minted.expires_at,
+            status: CredentialRecordStatus::Active,
+            status_list_index: index,
+        });
+    }
 
-    let container = CredentialContainer {
-        credential_type: state
-            .supported_credential
-            .credential_type
-            .clone()
-            .unwrap_or_default(),
-        payload: json!(vc_jws),
-        format: "jwt".to_string(),
-    };
     let message = CredentialMessage {
         context: vec![identity_hub_core::messages::DCP_CONTEXT.to_string()],
         message_type: "CredentialMessage".to_string(),
-        issuer_pid: request_id.to_string(),
-        holder_pid: holder_pid.to_string(),
+        issuer_pid: job.process_id.clone(),
+        holder_pid: job.holder_pid.clone(),
         status: "ISSUED".to_string(),
-        credentials: vec![container],
+        credentials: containers,
         rejection_reason: None,
     };
 
@@ -647,6 +793,7 @@ async fn try_deliver_issued_credential(
     // CredentialMessage [request]. If present in the client's initial
     // Self-Issued ID Token, the access token MUST be contained in the
     // Credential Issuer's Self-Issued ID Token `token` claim."
+    let now = now_secs();
     let mut si_payload = json!({
         "iss": state.identity.own_did(),
         "sub": state.identity.own_did(),
@@ -656,7 +803,7 @@ async fn try_deliver_issued_credential(
         "exp": now + 300,
         "jti": Uuid::new_v4().to_string(),
     });
-    if let Some(token) = delivery_bearer {
+    if let Some(token) = job.delivery_bearer {
         si_payload["token"] = json!(token);
     }
     let si_token = sign_jws(
@@ -676,43 +823,85 @@ async fn try_deliver_issued_credential(
     if !response.status().is_success() {
         return Err(format!("Storage API returned HTTP {}", response.status()));
     }
-    Ok(())
+    Ok(records)
 }
 
-/// Signs this Issuer Service's one supported credential type as a JWT VC
-/// (`vc` claim, W3C VC 1.1 data model) bound to `holder_did`. Shared by both
+/// A freshly signed credential and the facts its record needs.
+pub(crate) struct MintedCredential {
+    pub id: String,
+    pub jws: String,
+    pub issued_at: u64,
+    pub expires_at: u64,
+}
+
+/// The public URL of this issuer's revocation status list.
+pub(crate) fn status_list_url(state: &AppState) -> String {
+    format!("{}{STATUS_LIST_PATH}", state.base_url())
+}
+
+/// Signs `definition` as a JWT VC (`vc` claim, W3C VC 1.1 data model) bound
+/// to `holder_did`, valid for the definition's `validity`. Shared by both
 /// issuance protocols this hub speaks - DCP's asynchronous delivery
 /// (`try_deliver_issued_credential`) and OID4VCI's Credential Endpoint
-/// (`crate::oid4vci`) - so a holder gets the exact same credential whichever
+/// (`crate::oid4vci`) - so a holder gets the same credential whichever
 /// protocol it asked through.
-pub(crate) fn mint_supported_credential(state: &AppState, holder_did: &str) -> String {
-    let now = now_secs();
-    let credential_type = state
-        .supported_credential
-        .credential_type
-        .clone()
-        .unwrap_or_else(|| "VerifiableCredential".to_string());
+///
+/// With `status_index`, the VC carries a `StatusList2021Entry` pointing at
+/// that bit of [`status_list_url`]. DCP deliveries always pass one (they
+/// get an issued-credential record the admin API can revoke); OID4VCI
+/// issuance passes `None`, since nothing records it for revocation.
+pub(crate) fn mint_credential(
+    state: &AppState,
+    definition: &CredentialDefinition,
+    holder_did: &str,
+    status_index: Option<usize>,
+) -> MintedCredential {
+    let issued_at = now_secs();
+    let expires_at = issued_at + definition.validity;
+    let id = format!("urn:uuid:{}", Uuid::new_v4());
+    let mut vc = json!({
+        "@context": [VC_CONTEXT],
+        "id": id,
+        "type": ["VerifiableCredential", definition.credential_type],
+        "issuer": state.identity.own_did(),
+        "credentialSubject": { "id": holder_did },
+    });
+    if let Some(index) = status_index {
+        let list_url = status_list_url(state);
+        vc["@context"] = json!([VC_CONTEXT, STATUS_LIST_CONTEXT]);
+        vc["credentialStatus"] = json!({
+            "id": format!("{list_url}#{index}"),
+            "type": "StatusList2021Entry",
+            "statusPurpose": "revocation",
+            "statusListIndex": index.to_string(),
+            "statusListCredential": list_url,
+        });
+    }
     let vc_payload = json!({
         "iss": state.identity.own_did(),
         "sub": holder_did,
-        "vc": {
-            "@context": [VC_CONTEXT],
-            "type": ["VerifiableCredential", credential_type],
-            "credentialSubject": { "id": holder_did },
-        },
-        "iat": now,
-        "exp": now + 3600,
-        "jti": Uuid::new_v4().to_string(),
+        "vc": vc,
+        "iat": issued_at,
+        "exp": expires_at,
+        "jti": id,
     });
-    sign_jws(
+    let jws = sign_jws(
         &vc_payload,
         &state.identity.key_pair.signing_key(),
         state.identity.own_key_id(),
-    )
+    );
+    MintedCredential {
+        id,
+        jws,
+        issued_at,
+        expires_at,
+    }
 }
 
 /// `GET /requests/<id>` (Credential Request Status API). See
-/// `credential.issuance.protocol.md#credential-request-status-api`.
+/// `credential.issuance.protocol.md#credential-request-status-api`. The
+/// issuance process state is mapped onto DCP's three statuses by
+/// `ProcessState::dcp_status`.
 async fn request_status(State(state): State<Arc<AppState>>, Path(id): Path<String>) -> Response {
     match state
         .requests
@@ -721,20 +910,87 @@ async fn request_status(State(state): State<Arc<AppState>>, Path(id): Path<Strin
         .get(&id)
     {
         Some(record) => Json(CredentialStatus::new(
-            record.issuer_pid.clone(),
+            record.id.clone(),
             record.holder_pid.clone(),
-            &record.status,
+            record.state.dcp_status(),
         ))
         .into_response(),
         None => StatusCode::NOT_FOUND.into_response(),
     }
 }
 
+/// One catalog entry as a DCP `CredentialObject`.
+pub(crate) fn credential_object(definition: &CredentialDefinition) -> CredentialObject {
+    CredentialObject {
+        context: None,
+        id: definition.id.clone(),
+        object_type: "CredentialObject".to_string(),
+        credential_type: Some(definition.credential_type.clone()),
+        binding_methods: Some(vec!["did:web".to_string()]),
+        credential_schema: None,
+        profile: Some("vc10-sl2021/jwt".to_string()),
+        issuance_policy: None,
+        offer_reason: None,
+    }
+}
+
 /// `GET /metadata` (Issuer Metadata API). See
-/// `credential.issuance.protocol.md#issuer-metadata-api`.
+/// `credential.issuance.protocol.md#issuer-metadata-api`. Lists the whole
+/// credential catalog, in catalog order.
 async fn issuer_metadata(State(state): State<Arc<AppState>>) -> Json<IssuerMetadata> {
+    let supported = state
+        .definitions
+        .lock()
+        .expect("definitions lock poisoned")
+        .all()
+        .iter()
+        .map(credential_object)
+        .collect();
     Json(IssuerMetadata::new(
         state.identity.own_did().to_string(),
-        vec![state.supported_credential.clone()],
+        supported,
     ))
+}
+
+/// `GET /statuslist/revocation`: this issuer's StatusList2021Credential as a
+/// JWT signed with the issuer's own key (`application/vc+jwt`). Public and
+/// unauthenticated by design - verifiers dereference `statusListCredential`
+/// - so the signed JWT is cached until the next revocation changes a bit.
+async fn status_list(State(state): State<Arc<AppState>>) -> Response {
+    let jwt = {
+        let mut issued = state.issued.lock().expect("issued lock poisoned");
+        match &issued.status_list.cached_jwt {
+            Some(jwt) => jwt.clone(),
+            None => {
+                let list_url = status_list_url(&state);
+                let now = now_secs();
+                let payload = json!({
+                    "iss": state.identity.own_did(),
+                    "sub": list_url,
+                    "iat": now,
+                    "nbf": now,
+                    "vc": {
+                        "@context": [VC_CONTEXT, STATUS_LIST_CONTEXT],
+                        "id": list_url,
+                        "type": ["VerifiableCredential", "StatusList2021Credential"],
+                        "issuer": state.identity.own_did(),
+                        "credentialSubject": {
+                            "id": format!("{list_url}#list"),
+                            "type": "StatusList2021",
+                            "statusPurpose": "revocation",
+                            "encodedList": issued.status_list.encoded(),
+                        },
+                    },
+                });
+                let jwt = sign_jws(
+                    &payload,
+                    &state.identity.key_pair.signing_key(),
+                    state.identity.own_key_id(),
+                );
+                issued.status_list.cached_jwt = Some(jwt.clone());
+                jwt
+            }
+        }
+    };
+    ([(header::CONTENT_TYPE, "application/vc+jwt")], jwt).into_response()
 }

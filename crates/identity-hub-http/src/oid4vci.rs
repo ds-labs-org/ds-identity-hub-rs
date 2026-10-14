@@ -8,7 +8,8 @@
 //!   Authorization Server), `POST /oid4vci/token`, `POST /oid4vci/nonce`,
 //!   `POST /oid4vci/credential`, plus `GET /oid4vci/offers/{id}` serving
 //!   Credential Offers by reference. Issues the exact same JWT VC the DCP
-//!   Credential Request API delivers (`handlers::mint_supported_credential`).
+//!   Credential Request API delivers (`handlers::mint_credential`), minus the
+//!   revocation `credentialStatus` (OID4VCI issuance is not recorded).
 //! - **Credential Service = Wallet**: `POST /oid4vci/wallet/offers` redeems a
 //!   Credential Offer from any OID4VCI issuer (this hub's own Issuer Service
 //!   or a third party) and stores the result in the same credential store
@@ -66,7 +67,7 @@ use identity_hub_core::store::StoredCredentialBatch;
 
 use crate::auth::check_trusted_issuer;
 use crate::config::{Config, Mode};
-use crate::handlers::mint_supported_credential;
+use crate::handlers::mint_credential;
 use crate::state::AppState;
 use crate::validation::verify_credential_proofs;
 
@@ -290,29 +291,39 @@ fn credential_issuer_id(state: &AppState) -> String {
     state.base_url()
 }
 
+/// One OID4VCI credential configuration per entry of the Issuer Service's
+/// credential catalog (`AppState::definitions`), keyed by definition id.
 fn configurations_supported(
     state: &AppState,
 ) -> std::collections::BTreeMap<String, CredentialConfiguration> {
-    let supported = &state.supported_credential;
-    let credential_type = supported
-        .credential_type
-        .clone()
-        .unwrap_or_else(|| "VerifiableCredential".to_string());
-    std::collections::BTreeMap::from([(
-        supported.id.clone(),
-        CredentialConfiguration {
-            format: FORMAT_JWT_VC_JSON.to_string(),
-            scope: Some(credential_type.clone()),
-            cryptographic_binding_methods_supported: vec!["did:web".to_string(), "jwk".to_string()],
-            credential_signing_alg_values_supported: vec![json!("ES256")],
-            proof_types_supported: Some(
-                json!({"jwt": {"proof_signing_alg_values_supported": ["ES256"]}}),
-            ),
-            credential_definition: Some(CredentialDefinition {
-                types: vec!["VerifiableCredential".to_string(), credential_type],
-            }),
-        },
-    )])
+    state
+        .definitions
+        .lock()
+        .expect("definitions lock poisoned")
+        .all()
+        .iter()
+        .map(|definition| {
+            let credential_type = definition.credential_type.clone();
+            (
+                definition.id.clone(),
+                CredentialConfiguration {
+                    format: FORMAT_JWT_VC_JSON.to_string(),
+                    scope: Some(credential_type.clone()),
+                    cryptographic_binding_methods_supported: vec![
+                        "did:web".to_string(),
+                        "jwk".to_string(),
+                    ],
+                    credential_signing_alg_values_supported: vec![json!("ES256")],
+                    proof_types_supported: Some(
+                        json!({"jwt": {"proof_signing_alg_values_supported": ["ES256"]}}),
+                    ),
+                    credential_definition: Some(CredentialDefinition {
+                        types: vec!["VerifiableCredential".to_string(), credential_type],
+                    }),
+                },
+            )
+        })
+        .collect()
 }
 
 /// `GET /.well-known/openid-credential-issuer` (OID4VCI section 12.2).
@@ -669,7 +680,22 @@ async fn credential(
         );
     }
 
-    let vc = mint_supported_credential(&state, key.holder_did());
+    // The definition may have been deleted on the admin API since the offer
+    // was made; that is the same as the configuration not being offered.
+    let Some(definition) = state
+        .definitions
+        .lock()
+        .expect("definitions lock poisoned")
+        .get(config_id)
+        .cloned()
+    else {
+        return oauth_error(
+            StatusCode::BAD_REQUEST,
+            "unknown_credential_configuration",
+            format!("'{config_id}' is not offered by this issuer"),
+        );
+    };
+    let vc = mint_credential(&state, &definition, key.holder_did(), None).jws;
     tracing::info!(
         holder = key.holder_did(),
         config_id,

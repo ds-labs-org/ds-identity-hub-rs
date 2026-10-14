@@ -3,12 +3,12 @@ use std::sync::Mutex;
 use std::time::Duration;
 
 use identity_hub_core::identity::ServiceIdentity;
-use identity_hub_core::messages::CredentialObject;
 use identity_hub_core::scope::ScopeMatcher;
 use identity_hub_core::store::InMemoryCredentialStore;
 use identity_hub_core::sts::StsConfig;
 
 use crate::config::{Config, Mode};
+use crate::issuer::{DefinitionCatalog, HolderRegistry, IssuanceProcess, IssuedCredentials};
 use crate::outbound::OutboundPolicy;
 
 /// The one host every `host.docker.internal` reference in this process
@@ -104,20 +104,13 @@ impl SeenJtiCache {
     }
 }
 
-/// Tracks one accepted `CredentialRequestMessage` on the Issuer Service
-/// side, for `GET /requests/<id>` (Credential Request Status API).
-pub struct RequestRecord {
-    pub issuer_pid: String,
-    pub holder_pid: String,
-    pub status: String,
-}
-
-/// A fixed-capacity, insertion-ordered table of [`RequestRecord`]s, keyed by
-/// request id. Same shape as [`SeenJtiCache`]: O(1) lookup by id via the
+/// A fixed-capacity, insertion-ordered table of [`IssuanceProcess`]es (one
+/// per accepted Credential Request), keyed by process id (the DCP
+/// `issuerPid`). Same shape as [`SeenJtiCache`]: O(1) lookup by id via the
 /// `HashMap`, with a `VecDeque` recording arrival order so eviction, once
 /// `capacity` is exceeded, takes the oldest record first.
 pub struct RequestTable {
-    records: HashMap<String, RequestRecord>,
+    records: HashMap<String, IssuanceProcess>,
     order: VecDeque<String>,
     capacity: usize,
 }
@@ -145,7 +138,7 @@ impl RequestTable {
     /// overwrites an existing entry. If the table is now over `capacity`,
     /// evicts the oldest tracked request(s) first - the one just inserted is
     /// never evicted by this call.
-    pub fn insert(&mut self, id: String, record: RequestRecord) {
+    pub fn insert(&mut self, id: String, record: IssuanceProcess) {
         self.records.insert(id.clone(), record);
         self.order.push_back(id);
         while self.records.len() > self.capacity {
@@ -158,12 +151,22 @@ impl RequestTable {
         }
     }
 
-    pub fn get(&self, id: &str) -> Option<&RequestRecord> {
+    pub fn get(&self, id: &str) -> Option<&IssuanceProcess> {
         self.records.get(id)
     }
 
-    pub fn get_mut(&mut self, id: &str) -> Option<&mut RequestRecord> {
+    pub fn get_mut(&mut self, id: &str) -> Option<&mut IssuanceProcess> {
         self.records.get_mut(id)
+    }
+
+    /// Every tracked process, oldest first.
+    pub fn iter(&self) -> impl Iterator<Item = &IssuanceProcess> {
+        self.order.iter().filter_map(|id| self.records.get(id))
+    }
+
+    /// Every tracked process, mutably, in no particular order.
+    pub fn iter_mut(&mut self) -> impl Iterator<Item = &mut IssuanceProcess> {
+        self.records.values_mut()
     }
 }
 
@@ -185,7 +188,9 @@ pub struct AppState {
     pub scope_matcher: ScopeMatcher,
     /// Storage API backing store (Credential Service mode).
     pub store: InMemoryCredentialStore,
-    /// In-flight/completed credential requests (Issuer Service mode),
+    /// Issuance processes - in-flight/completed credential requests (Issuer
+    /// Service mode), exposed both on DCP `GET /requests/<id>` and on the
+    /// Issuer Admin API's `issuanceprocesses`,
     /// capped at [`MAX_TRACKED_REQUESTS`] with oldest-first eviction - see
     /// `../../ARCHITECTURE.md`, "What's simplified or stubbed" (2026-09-20
     /// independent security audit, MEDIUM). An evicted request's `GET
@@ -199,11 +204,16 @@ pub struct AppState {
     /// Acquired inside the spawned task itself, never on the request path,
     /// so it changes no protocol-visible response.
     pub delivery_semaphore: tokio::sync::Semaphore,
-    /// The one `CredentialObject` this bootstrap's Issuer Service claims to
-    /// support - real enough to drive a genuine Issuer Metadata API /
-    /// Credential Request API round trip, but a single hardcoded type
-    /// rather than a configurable catalog (see `../../ARCHITECTURE.md`).
-    pub supported_credential: CredentialObject,
+    /// The credential catalog (Issuer Service mode): what `/metadata`
+    /// advertises, what the Credential Request API and OID4VCI accept, and
+    /// what the Issuer Admin API edits. Seeded with `membership-credential`.
+    /// See `crate::issuer` for the lock order across these four tables.
+    pub definitions: Mutex<DefinitionCatalog>,
+    /// Holder registry (Issuer Service mode), capped at
+    /// `issuer::MAX_HOLDERS` with refusal, not eviction.
+    pub holders: Mutex<HolderRegistry>,
+    /// Issued-credential records and the StatusList2021 revocation list.
+    pub issued: Mutex<IssuedCredentials>,
     pub http: reqwest::Client,
     /// Deny-by-default allow-list every outbound request this process makes
     /// to a destination not entirely of its own choosing must be checked
@@ -234,17 +244,6 @@ impl AppState {
         let sts_party = ServiceIdentity::new(&sts_party_host, "sts-party");
         let scope_matcher = ScopeMatcher::new(&config.scope_pattern)
             .expect("configured scope pattern is a valid regex");
-        let supported_credential = CredentialObject {
-            context: None,
-            id: "membership-credential".to_string(),
-            object_type: "CredentialObject".to_string(),
-            credential_type: Some("MembershipCredential".to_string()),
-            binding_methods: Some(vec!["did:web".to_string()]),
-            credential_schema: None,
-            profile: Some("vc10-sl2021/jwt".to_string()),
-            issuance_policy: None,
-            offer_reason: None,
-        };
         let sts_config = StsConfig::new(
             config.sts_client_id.clone(),
             config.sts_client_secret.clone(),
@@ -317,7 +316,9 @@ impl AppState {
             store: InMemoryCredentialStore::new(),
             requests: Mutex::new(RequestTable::new(MAX_TRACKED_REQUESTS)),
             delivery_semaphore: tokio::sync::Semaphore::new(MAX_IN_FLIGHT_DELIVERIES),
-            supported_credential,
+            definitions: Mutex::new(DefinitionCatalog::seeded(dcp_core::now_secs())),
+            holders: Mutex::new(HolderRegistry::default()),
+            issued: Mutex::new(IssuedCredentials::default()),
             http,
             outbound,
             seen_jti: Mutex::new(SeenJtiCache::new(MAX_SEEN_JTI)),

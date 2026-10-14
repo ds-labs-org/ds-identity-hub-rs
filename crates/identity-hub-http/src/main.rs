@@ -2,8 +2,10 @@ use std::net::SocketAddr;
 
 use clap::{Parser, Subcommand};
 use identity_hub_core::scope::DEFAULT_SCOPE_PATTERN;
-use identity_hub_http::config::Mode;
-use identity_hub_http::{Config, build, serve};
+use identity_hub_http::config::{
+    DEFAULT_ADMIN_BIND, DEFAULT_PARTICIPANT_CONTEXT_ID, HolderApproval, Mode,
+};
+use identity_hub_http::{Config, build, build_admin, serve};
 
 /// ds-identity-hub-rs: a from-scratch Rust DCP Identity Hub bootstrap. Boots
 /// as either a Credential Service (Verifiable Presentation Protocol +
@@ -94,6 +96,24 @@ struct CommonArgs {
     /// Extra PEM trust anchor for outbound TLS (may be repeated).
     #[arg(long = "extra-root-cert")]
     extra_root_certs: Vec<std::path::PathBuf>,
+    /// Issuer Admin API listen address (issuer-service only; loopback by
+    /// default - put a gateway in front of it rather than exposing it).
+    #[arg(long, default_value = DEFAULT_ADMIN_BIND)]
+    admin_bind: SocketAddr,
+    /// Bearer token for the Issuer Admin API. Unset (or empty) means no
+    /// admin listener at all. Prefer the environment variable, which keeps
+    /// the token out of the process list.
+    #[arg(long, env = "IDENTITY_HUB_ADMIN_TOKEN", hide_env_values = true)]
+    admin_token: Option<String>,
+    /// The single participant context id the Issuer Admin API answers to
+    /// (base64-encoded in its `{pc}` path segment).
+    #[arg(long, default_value = DEFAULT_PARTICIPANT_CONTEXT_ID)]
+    participant_context_id: String,
+    /// What a Credential Request from an unknown DID does: `auto` approves
+    /// the holder and delivers immediately (DCP TCK behaviour); `manual`
+    /// creates a pending holder whose requests wait for an operator.
+    #[arg(long, value_enum, default_value_t = HolderApproval::Auto)]
+    holder_approval: HolderApproval,
 }
 
 impl CommonArgs {
@@ -124,13 +144,12 @@ impl CommonArgs {
             oid4vci_offer_endpoint: self.oid4vci_offer_endpoint,
             oid4vci_offer_tx_code: self.oid4vci_offer_tx_code,
             extra_root_certs,
-            admin_bind: identity_hub_http::config::DEFAULT_ADMIN_BIND
-                .parse()
-                .expect("valid default admin bind"),
-            admin_token: None,
-            participant_context_id: identity_hub_http::config::DEFAULT_PARTICIPANT_CONTEXT_ID
-                .to_string(),
-            holder_approval: Default::default(),
+            admin_bind: self.admin_bind,
+            // An empty token would accept `Authorization: Bearer ` - treat
+            // it as no token (no admin listener).
+            admin_token: self.admin_token.filter(|t| !t.is_empty()),
+            participant_context_id: self.participant_context_id,
+            holder_approval: self.holder_approval,
         }
     }
 }
@@ -202,7 +221,41 @@ async fn main() {
         }
     }
 
-    if let Err(err) = serve(&config, router).await {
+    if config.admin_token.is_some() && config.mode != Mode::IssuerService {
+        tracing::warn!(
+            "--admin-token is ignored: the Issuer Admin API exists in issuer-service mode only"
+        );
+    }
+    let admin = match build_admin(&state) {
+        Some(admin_router) => {
+            let listener = match tokio::net::TcpListener::bind(config.admin_bind).await {
+                Ok(listener) => listener,
+                Err(err) => {
+                    tracing::error!(error = %err, bind = %config.admin_bind, "cannot bind the Issuer Admin API");
+                    std::process::exit(1);
+                }
+            };
+            tracing::info!(
+                admin_bind = %config.admin_bind,
+                participant_context_id = %config.participant_context_id,
+                holder_approval = ?config.holder_approval,
+                "serving the Issuer Admin API"
+            );
+            Some(tokio::spawn(async move {
+                axum::serve(listener, admin_router).await
+            }))
+        }
+        None => None,
+    };
+
+    let result = match admin {
+        Some(admin) => tokio::select! {
+            result = serve(&config, router) => result,
+            joined = admin => joined.unwrap_or_else(|e| Err(std::io::Error::other(e))),
+        },
+        None => serve(&config, router).await,
+    };
+    if let Err(err) = result {
         tracing::error!(error = %err, "server exited with an error");
         std::process::exit(1);
     }
@@ -384,5 +437,54 @@ mod cli_scheme_switch_tests {
         let config = parsed_config("credential-service", &[])
             .expect("the documented default invocation must keep parsing");
         assert_eq!(config.scheme(), "http");
+    }
+}
+
+/// The Issuer Admin API flags (governance contract, section 1).
+#[cfg(test)]
+mod cli_admin_flag_tests {
+    use super::*;
+
+    fn config(extra: &[&str]) -> Config {
+        let mut argv = vec!["identity-hub", "issuer-service"];
+        argv.extend_from_slice(extra);
+        match Cli::try_parse_from(argv).expect("parses").mode {
+            CliMode::IssuerService(args) => args.into_config(Mode::IssuerService),
+            CliMode::CredentialService(_) => unreachable!(),
+        }
+    }
+
+    #[test]
+    fn defaults() {
+        // SAFETY: test-only; no other test in this binary reads this variable.
+        unsafe { std::env::remove_var("IDENTITY_HUB_ADMIN_TOKEN") };
+        let config = config(&[]);
+        assert_eq!(config.admin_bind.to_string(), "127.0.0.1:8182");
+        assert_eq!(config.admin_token, None);
+        assert_eq!(config.participant_context_id, "issuer");
+        assert_eq!(config.holder_approval, HolderApproval::Auto);
+    }
+
+    #[test]
+    fn explicit_flags() {
+        let config = config(&[
+            "--admin-bind",
+            "0.0.0.0:9000",
+            "--admin-token",
+            "s3cret",
+            "--participant-context-id",
+            "tenant",
+            "--holder-approval",
+            "manual",
+        ]);
+        assert_eq!(config.admin_bind.to_string(), "0.0.0.0:9000");
+        assert_eq!(config.admin_token.as_deref(), Some("s3cret"));
+        assert_eq!(config.participant_context_id, "tenant");
+        assert_eq!(config.holder_approval, HolderApproval::Manual);
+    }
+
+    #[test]
+    fn empty_token_means_no_admin_api() {
+        assert_eq!(config(&["--admin-token", ""]).admin_token, None);
     }
 }
