@@ -42,7 +42,10 @@ or `identity-hub issuer-service`):
   Credential Request API (`POST /credentials`), Credential Request Status
   API (`GET /requests/<id>`), and Issuer Metadata API (`GET /metadata`),
   plus asynchronous delivery of issued credentials to a requester's own
-  Credential Service.
+  Credential Service, a public StatusList2021 revocation list
+  (`GET /statuslist/revocation`), and - on a separate, token-protected
+  listener - the **Issuer Admin API** the governance console drives (see
+  below).
 
 Both modes also host a `did:web`-resolvable DID document
 (`GET /<segment>/did.json`) and a minimal Secure Token Service (`POST
@@ -86,6 +89,69 @@ See [`ARCHITECTURE.md`](ARCHITECTURE.md) for exactly what's implemented,
 simplified, or out of scope, and for a real, date-stamped conformance run
 against the official
 [Eclipse Dataspace TCK for DCP](https://github.com/eclipse-dataspacetck/dcp-tck).
+
+## Issuer Admin API (issuer-service mode)
+
+An operator API over the Issuer Service's credential catalog, holders,
+issuance processes and issued credentials, shaped like Eclipse EDC
+IdentityHub's Issuer Admin API `v1alpha` so the same governance console can
+drive either. The contract it implements is `governance/api-contract.md`,
+section 1; tests are in `crates/identity-hub-http/tests/issuer_admin_api.rs`.
+
+- **Separate listener**, `--admin-bind` (default `127.0.0.1:8182`), started
+  only when an admin token is set (`--admin-token` or, preferably, env
+  `IDENTITY_HUB_ADMIN_TOKEN`). No token, no listener.
+- Every request needs `Authorization: Bearer <admin token>`; otherwise
+  `401 {"error": ...}`. All errors are JSON `{"error"}`: `400` malformed or
+  invalid body, `404` unknown id, `409` duplicate or rule violation, `503`
+  a capped table is full.
+- Single tenant: `{pc}` is the base64 (standard or url-safe, padded or
+  not) of `--participant-context-id` (default `issuer`, i.e. `aXNzdWVy`);
+  anything else is `404`.
+- `.../query` endpoints take an EDC QuerySpec (`offset`, `limit` default 50
+  capped at 500, `filterExpression` with `=` only, `sortField`,
+  `sortOrder`) and return a plain JSON array. Timestamps are unix seconds.
+
+| Method and path (under `/v1alpha/participants/{pc}`) | Result |
+|---|---|
+| `GET ` (the prefix itself) | participant `{participantContextId, did, state}` |
+| `POST /credentialdefinitions` | `201`; `409` duplicate id |
+| `PUT /credentialdefinitions` | `200`; `404` unknown id |
+| `GET /credentialdefinitions/{id}` | `200` / `404` |
+| `DELETE /credentialdefinitions/{id}` | `204` / `404` / `409` while a SUBMITTED or APPROVED process uses it |
+| `POST /credentialdefinitions/query` | `200 [...]` |
+| `POST /holders` | `201`, created `approved`; `409` duplicate holderId or did |
+| `PUT /holders` | `200` (updates `name`/`properties`) / `404` |
+| `GET /holders/{holderId}` | `200` / `404` |
+| `POST /holders/query` | `200 [...]` |
+| `POST /holders/{holderId}/approve` | `200`; its SUBMITTED processes -> APPROVED, delivery starts |
+| `POST /holders/{holderId}/reject` | `200`; its SUBMITTED processes -> REJECTED |
+| `GET /issuanceprocesses/{id}` | `200` / `404` |
+| `POST /issuanceprocesses/query` | `200 [...]` |
+| `POST /credentials/query` | `200 [...]` |
+| `GET /credentials/{id}/status` | `200 {"status": "active"\|"revoked"}` / `404` |
+| `POST /credentials/{id}/revoke` | `200` + record (idempotent); sets the status-list bit |
+
+The catalog starts with one definition, `membership-credential` /
+`MembershipCredential`. `GET /metadata` lists every definition, and a DCP
+Credential Request naming an unknown definition id is `400`.
+
+`--holder-approval auto|manual` (default `auto`) decides what a Credential
+Request from a DID with no holder record does: `auto` creates the holder
+`approved` and delivers immediately (the DCP TCK flow, unchanged); `manual`
+creates it `pending` and the issuance process waits as `SUBMITTED` until an
+operator approves or rejects the holder. A rejected holder's requests are
+refused `403`; once 4096 holders exist, an unknown DID gets `503`.
+`GET /requests/{id}` maps SUBMITTED/APPROVED to `RECEIVED`, DELIVERED to
+`ISSUED`, and ERRORED/REJECTED to `REJECTED`.
+
+Every credential delivered over DCP carries a `StatusList2021Entry`
+pointing at `<base>/statuslist/revocation`, a public JWT
+(`application/vc+jwt`) signed with the issuer key whose
+`credentialSubject.encodedList` is the GZIP + base64url (no padding) of a
+131072-bit list, most significant bit first.
+
+All of this state is in memory and lost on restart.
 
 ## Crates
 
@@ -154,7 +220,23 @@ cargo run -p identity-hub-http --bin identity-hub -- credential-service --did-ho
 
 # Minimal Issuer Service (CIP only):
 cargo run -p identity-hub-http --bin identity-hub -- issuer-service --bind 0.0.0.0:8081 --did-host localhost:8081
+
+# Issuer Service with the Issuer Admin API on 127.0.0.1:8182, holders
+# approved by hand:
+IDENTITY_HUB_ADMIN_TOKEN=change-me \
+cargo run -p identity-hub-http --bin identity-hub -- issuer-service --bind 0.0.0.0:8081 --did-host localhost:8081 \
+  --holder-approval manual
+curl -s -H 'Authorization: Bearer change-me' http://127.0.0.1:8182/v1alpha/participants/aXNzdWVy
 ```
+
+Issuer Admin API flags (issuer-service only):
+
+| Flag | Default | Meaning |
+|---|---|---|
+| `--admin-bind <addr>` | `127.0.0.1:8182` | admin listener address |
+| `--admin-token <token>` / env `IDENTITY_HUB_ADMIN_TOKEN` | unset | bearer token; unset or empty = no admin listener |
+| `--participant-context-id <id>` | `issuer` | the one `{pc}` the admin API answers to |
+| `--holder-approval auto\|manual` | `auto` | approval policy for unknown DIDs |
 
 OID4VCI round trip between the two. Start the Credential Service with
 `--trusted-issuer-did did:web:localhost%3A8081:issuer-service` so it accepts
