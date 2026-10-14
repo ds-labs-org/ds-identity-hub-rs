@@ -5,6 +5,7 @@
 pub mod auth;
 pub mod config;
 mod handlers;
+pub mod oid4vci;
 pub mod outbound;
 pub mod state;
 pub mod validation;

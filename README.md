@@ -49,6 +49,32 @@ Both modes also host a `did:web`-resolvable DID document
 /sts/token`, an OAuth2 `client_credentials`-grant-shaped endpoint that
 mints real ES256-signed Self-Issued ID Tokens).
 
+### OpenID for Verifiable Credential Issuance (OID4VCI 1.0), side by side
+
+Each mode also speaks
+[OID4VCI 1.0](https://openid.net/specs/openid-4-verifiable-credential-issuance-1_0.html)
+on the same port, next to DCP (Pre-Authorized Code flow, `jwt_vc_json`,
+`jwt` key proofs):
+
+- **Issuer Service = OID4VCI Credential Issuer** — `GET
+  /.well-known/openid-credential-issuer`, `GET
+  /.well-known/oauth-authorization-server` (it is its own Authorization
+  Server), `POST /oid4vci/token`, `POST /oid4vci/nonce`, `POST
+  /oid4vci/credential`, and `GET /oid4vci/offers/<id>` (offers by
+  reference). It issues the same signed credential the DCP Credential
+  Request API delivers.
+- **Credential Service = OID4VCI Wallet** — `POST /oid4vci/wallet/offers`
+  redeems an offer from any OID4VCI issuer and stores the credential in the
+  same store the DCP Storage API writes to, so it is immediately
+  presentable over DCP's `POST /presentations/query`.
+
+Creating an offer (`POST /oid4vci/offers` on the Issuer Service) and asking
+the wallet to redeem one are operator actions neither spec defines; both
+require HTTP Basic auth with the configured STS client credentials. The
+wallet keeps the DCP side's posture: outbound allow-list on every request,
+and only credentials from a `--trusted-issuer-did`, genuinely signed and
+bound to this Credential Service's own DID, are stored.
+
 See [`ARCHITECTURE.md`](ARCHITECTURE.md) for exactly what's implemented,
 simplified, or out of scope, and for a real, date-stamped conformance run
 against the official
@@ -58,7 +84,8 @@ against the official
 
 - `identity-hub-core` — domain types: `did:web` service-identity
   construction, DCP's Verifiable Presentation Protocol / Credential
-  Issuance Protocol wire-message shapes, an in-memory accepted-credential
+  Issuance Protocol wire-message shapes, OID4VCI 1.0 wire shapes and
+  key-proof checks (`oid4vci`), an in-memory accepted-credential
   store, a DCP scope-to-credential-type matcher, and a minimal in-memory
   Secure Token Service. Built on
   [`ds-dcp-core-rs`](https://github.com/ds-labs-org/ds-dcp-core-rs)'s
@@ -91,7 +118,8 @@ crates/
       config.rs             Mode/Config
       state.rs               shared application state
       auth.rs                 Self-Issued ID Token validation
-      handlers.rs             all HTTP routes, both modes
+      handlers.rs             all DCP HTTP routes, both modes
+      oid4vci.rs              OID4VCI issuer + wallet routes
       main.rs                 CLI entry point
     tests/
       dcp_tck.rs              real dcp-tck-runtime conformance test
@@ -119,6 +147,21 @@ cargo run -p identity-hub-http --bin identity-hub -- credential-service --did-ho
 
 # Minimal Issuer Service (CIP only):
 cargo run -p identity-hub-http --bin identity-hub -- issuer-service --bind 0.0.0.0:8081 --did-host localhost:8081
+```
+
+OID4VCI round trip between the two. Start the Credential Service with
+`--trusted-issuer-did did:web:localhost%3A8081:issuer-service` so it accepts
+what that Issuer Service signs; `<id>:<secret>` is `--sts-client-id`/
+`--sts-client-secret` (set real values outside local testing):
+
+```bash
+# 1. Issuer operator mints an offer (add "tx_code": true for a PIN).
+curl -s -u <id>:<secret> -H 'content-type: application/json' \
+  -d '{}' http://localhost:8081/oid4vci/offers
+# 2. Hand its "offer_uri" (plus "tx_code" if any) to the wallet.
+curl -s -u <id>:<secret> -H 'content-type: application/json' \
+  -d '{"offer": "openid-credential-offer://?credential_offer_uri=..."}' \
+  http://localhost:8080/oid4vci/wallet/offers
 ```
 
 ## License

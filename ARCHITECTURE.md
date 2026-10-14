@@ -1121,6 +1121,60 @@ including the first (wrong) fixes tried along the way).
   whether this hub needs a stable, persisted identity across restarts (a
   real deployment would).
 
+## OID4VCI alongside DCP
+
+**2026-10-14.** Both process modes also speak
+[OpenID for Verifiable Credential Issuance 1.0](https://openid.net/specs/openid-4-verifiable-credential-issuance-1_0.html)
+on the same port as DCP, so a participant can obtain credentials over
+either protocol and present them over DCP. Wire shapes and the network-free
+proof checks live in `identity-hub-core/src/oid4vci.rs`; routes in
+`identity-hub-http/src/oid4vci.rs`; end-to-end coverage in
+`identity-hub-http/tests/oid4vci.rs`.
+
+- **Issuer Service = Credential Issuer, Pre-Authorized Code flow.** The
+  Credential Issuer Identifier is the service's base URL; it is its own
+  Authorization Server (no `authorization_servers` in its metadata, RFC 8414
+  metadata at `/.well-known/oauth-authorization-server`). One configuration,
+  `membership-credential`, format `jwt_vc_json`, derived from the same
+  `AppState::supported_credential` the DCP Issuer Metadata API serves, and
+  signed by the same `handlers::mint_supported_credential` the DCP delivery
+  path now calls, so the two protocols issue byte-for-byte the same kind of
+  credential. Key proofs must be `typ: openid4vci-proof+jwt`, ES256, `aud`
+  equal to the issuer identifier, `iat` within 300 s (30 s skew), and carry a
+  single-use `c_nonce` from `POST /oid4vci/nonce`. The holder key is either a
+  `did:web` `kid` (resolved through `AppState::outbound`, exactly like DCP
+  DID resolution) or an inline P-256 `jwk` (holder bound as its `did:jwk`).
+  Pre-authorized codes and offers are single-use; an optional six-digit
+  Transaction Code gets three tries before its code is burned. All four
+  issuer tables are capped at 2048 entries, oldest evicted, with per-entry
+  expiry (offers/codes 600 s, tokens and nonces 300 s), following the
+  bounded-state pattern of the 2026-09-20 audit fixes. Both the 1.0 `proofs`
+  object and the older single `proof` object are accepted.
+- **Credential Service = Wallet.** `POST /oid4vci/wallet/offers` accepts an
+  `openid-credential-offer://` URI, a by-value offer, or a
+  `credential_offer_uri`, then runs discovery, token, nonce and credential
+  requests, signing its key proof with its own `did:web` key. Every URL it
+  fetches, including ones taken from issuer metadata, goes through
+  `OutboundPolicy` first. A returned credential is stored only if it passes
+  the same checks the DCP Storage API applies (`check_trusted_issuer`, deny
+  by default, and `validation::verify_credential_proofs`) plus two
+  wallet-specific ones: bound (`sub`) to this Credential Service's own DID,
+  and not expired. It lands in the same `InMemoryCredentialStore` as DCP
+  deliveries (format `jwt_vc_json`, filed under its most specific
+  `vc.type`), so DCP's Presentation API discloses it under the usual scope
+  rules with no further step.
+- **Operator endpoints.** Neither spec defines how an issuer mints an offer
+  or how a wallet is told to redeem one. `POST /oid4vci/offers` (Issuer
+  Service) and `POST /oid4vci/wallet/offers` (Credential Service) take HTTP
+  Basic auth with the existing STS client credentials rather than adding a
+  second operator secret, which shares the STS's known limitation of one
+  hardcoded pair.
+
+Not done for OID4VCI: the Authorization Code flow, deferred and batch
+issuance, the Notification Endpoint, encrypted requests/responses, DPoP,
+formats other than `jwt_vc_json`, and a run against the OpenID Foundation's
+OID4VCI conformance suite (the equivalent of the DCP TCK run above).
+
 ## What's out of scope for this bootstrap
 
 - **The Verifier role.** This project never queries anyone else's

@@ -221,6 +221,10 @@ pub struct AppState {
     /// independent security audit, MEDIUM) - see `../../ARCHITECTURE.md`,
     /// "What's simplified or stubbed".
     pub seen_jti: Mutex<SeenJtiCache>,
+    /// OID4VCI Credential Issuer state (Issuer Service mode): offers,
+    /// pre-authorized codes, access tokens and `c_nonce`s - see
+    /// `crate::oid4vci`. Unused, and empty, in Credential Service mode.
+    pub oid4vci: crate::oid4vci::IssuerState,
 }
 
 impl AppState {
@@ -309,6 +313,7 @@ impl AppState {
             http,
             outbound,
             seen_jti: Mutex::new(SeenJtiCache::new(MAX_SEEN_JTI)),
+            oid4vci: crate::oid4vci::IssuerState::default(),
         }
     }
 

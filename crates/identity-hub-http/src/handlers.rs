@@ -44,6 +44,10 @@ pub fn router(state: Arc<AppState>) -> Router {
             .route("/requests/{id}", get(request_status))
             .route("/metadata", get(issuer_metadata)),
     };
+    // OID4VCI runs side by side with DCP on the same process: the Issuer
+    // Service is also an OID4VCI Credential Issuer, the Credential Service
+    // also an OID4VCI Wallet - see `crate::oid4vci`.
+    router = router.merge(crate::oid4vci::routes(state.mode()));
 
     router.with_state(state)
 }
@@ -617,28 +621,7 @@ async fn try_deliver_issued_credential(
         .map_err(|e| e.to_string())?;
 
     let now = now_secs();
-    let credential_type = state
-        .supported_credential
-        .credential_type
-        .clone()
-        .unwrap_or_else(|| "VerifiableCredential".to_string());
-    let vc_payload = json!({
-        "iss": state.identity.own_did(),
-        "sub": holder_did,
-        "vc": {
-            "@context": [VC_CONTEXT],
-            "type": ["VerifiableCredential", credential_type],
-            "credentialSubject": { "id": holder_did },
-        },
-        "iat": now,
-        "exp": now + 3600,
-        "jti": Uuid::new_v4().to_string(),
-    });
-    let vc_jws = sign_jws(
-        &vc_payload,
-        &state.identity.key_pair.signing_key(),
-        state.identity.own_key_id(),
-    );
+    let vc_jws = mint_supported_credential(state, holder_did);
 
     let container = CredentialContainer {
         credential_type: state
@@ -694,6 +677,38 @@ async fn try_deliver_issued_credential(
         return Err(format!("Storage API returned HTTP {}", response.status()));
     }
     Ok(())
+}
+
+/// Signs this Issuer Service's one supported credential type as a JWT VC
+/// (`vc` claim, W3C VC 1.1 data model) bound to `holder_did`. Shared by both
+/// issuance protocols this hub speaks - DCP's asynchronous delivery
+/// (`try_deliver_issued_credential`) and OID4VCI's Credential Endpoint
+/// (`crate::oid4vci`) - so a holder gets the exact same credential whichever
+/// protocol it asked through.
+pub(crate) fn mint_supported_credential(state: &AppState, holder_did: &str) -> String {
+    let now = now_secs();
+    let credential_type = state
+        .supported_credential
+        .credential_type
+        .clone()
+        .unwrap_or_else(|| "VerifiableCredential".to_string());
+    let vc_payload = json!({
+        "iss": state.identity.own_did(),
+        "sub": holder_did,
+        "vc": {
+            "@context": [VC_CONTEXT],
+            "type": ["VerifiableCredential", credential_type],
+            "credentialSubject": { "id": holder_did },
+        },
+        "iat": now,
+        "exp": now + 3600,
+        "jti": Uuid::new_v4().to_string(),
+    });
+    sign_jws(
+        &vc_payload,
+        &state.identity.key_pair.signing_key(),
+        state.identity.own_key_id(),
+    )
 }
 
 /// `GET /requests/<id>` (Credential Request Status API). See

@@ -5,7 +5,7 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 publish = false
-description = "axum HTTP surface for ds-identity-hub-rs: a DCP Credential Service (Presentation API, Storage API, Credential Offer API, DID hosting, STS) and a minimal Issuer Service (Credential Request API, Credential Request Status API, Issuer Metadata API)."
+description = "axum HTTP surface for ds-identity-hub-rs: a DCP Credential Service (Presentation API, Storage API, Credential Offer API, DID hosting, STS) that is also an OID4VCI wallet, and a minimal Issuer Service (DCP Credential Request API, Credential Request Status API, Issuer Metadata API) that is also an OID4VCI Credential Issuer."
 
 [[bin]]
 name = "identity-hub"
@@ -29,6 +29,7 @@ uuid = { workspace = true }
 reqwest = { workspace = true }
 regex = { workspace = true }
 clap = { workspace = true }
+base64 = { workspace = true }
 
 [dev-dependencies]
 # Runs the real `eclipsedataspacetck/dcp-tck-runtime` container in
