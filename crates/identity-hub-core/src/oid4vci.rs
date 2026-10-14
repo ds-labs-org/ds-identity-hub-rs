@@ -109,8 +109,10 @@ pub struct CredentialConfiguration {
     pub scope: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub cryptographic_binding_methods_supported: Vec<String>,
+    /// Strings for JOSE formats, COSE integers (e.g. `-7`) for `mso_mdoc`,
+    /// so kept untyped: one mdoc entry must not fail the whole document.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub credential_signing_alg_values_supported: Vec<String>,
+    pub credential_signing_alg_values_supported: Vec<Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub proof_types_supported: Option<Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -269,9 +271,15 @@ pub struct ErrorResponse {
 /// Builds the well-known URL for `issuer` per RFC 8414 section 3.1 /
 /// OID4VCI section 12.2.2: the `/.well-known/<name>` segment goes between
 /// the authority and any path component, never appended after it.
+///
+/// The two specs differ on a trailing `/`: RFC 8414 removes it before
+/// inserting `oauth-authorization-server`, while OID4VCI 1.0 inserts
+/// `openid-credential-issuer` into the identifier as is, so an issuer
+/// `https://h/tenant/` publishes at `https://h/.well-known/openid-credential-issuer/tenant/`.
 pub fn well_known_url(issuer: &str, name: &str) -> Result<String, String> {
-    let issuer = issuer.trim_end_matches('/');
-    let (scheme, rest) = issuer
+    let keeps_trailing_slash = name == CREDENTIAL_ISSUER_WELL_KNOWN;
+    let trimmed = issuer.trim_end_matches('/');
+    let (scheme, rest) = trimmed
         .split_once("://")
         .ok_or_else(|| format!("issuer identifier '{issuer}' is not an absolute URL"))?;
     let (authority, path) = match rest.find('/') {
@@ -281,7 +289,14 @@ pub fn well_known_url(issuer: &str, name: &str) -> Result<String, String> {
     if authority.is_empty() {
         return Err(format!("issuer identifier '{issuer}' has no host"));
     }
-    Ok(format!("{scheme}://{authority}/.well-known/{name}{path}"))
+    let slash = if keeps_trailing_slash && !path.is_empty() && issuer.ends_with('/') {
+        "/"
+    } else {
+        ""
+    };
+    Ok(format!(
+        "{scheme}://{authority}/.well-known/{name}{path}{slash}"
+    ))
 }
 
 // ---- Key proofs ----
@@ -521,6 +536,27 @@ mod tests {
     }
 
     #[test]
+    fn issuer_metadata_accepts_cose_algorithm_identifiers() {
+        let metadata: CredentialIssuerMetadata = serde_json::from_value(json!({
+            "credential_issuer": "https://issuer.example/tenant/",
+            "credential_endpoint": "https://issuer.example/tenant/credential",
+            "credential_configurations_supported": {
+                "pid_sd_jwt": {
+                    "format": "dc+sd-jwt",
+                    "credential_signing_alg_values_supported": ["ES256"]
+                },
+                "pid_mdoc": {
+                    "format": "mso_mdoc",
+                    "cryptographic_binding_methods_supported": ["cose_key"],
+                    "credential_signing_alg_values_supported": [-7]
+                }
+            }
+        }))
+        .unwrap();
+        assert_eq!(metadata.credential_configurations_supported.len(), 2);
+    }
+
+    #[test]
     fn well_known_url_inserts_the_segment_before_the_path() {
         assert_eq!(
             well_known_url("https://issuer.example", CREDENTIAL_ISSUER_WELL_KNOWN).unwrap(),
@@ -533,6 +569,18 @@ mod tests {
             )
             .unwrap(),
             "https://issuer.example/.well-known/oauth-authorization-server/tenant"
+        );
+        assert_eq!(
+            well_known_url(
+                "https://issuer.example/tenant/",
+                CREDENTIAL_ISSUER_WELL_KNOWN
+            )
+            .unwrap(),
+            "https://issuer.example/.well-known/openid-credential-issuer/tenant/"
+        );
+        assert_eq!(
+            well_known_url("https://issuer.example/", CREDENTIAL_ISSUER_WELL_KNOWN).unwrap(),
+            "https://issuer.example/.well-known/openid-credential-issuer"
         );
         assert!(well_known_url("issuer.example", "x").is_err());
     }

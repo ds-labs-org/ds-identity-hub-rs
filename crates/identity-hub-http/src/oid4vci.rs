@@ -304,7 +304,7 @@ fn configurations_supported(
             format: FORMAT_JWT_VC_JSON.to_string(),
             scope: Some(credential_type.clone()),
             cryptographic_binding_methods_supported: vec!["did:web".to_string(), "jwk".to_string()],
-            credential_signing_alg_values_supported: vec!["ES256".to_string()],
+            credential_signing_alg_values_supported: vec![json!("ES256")],
             proof_types_supported: Some(
                 json!({"jwt": {"proof_signing_alg_values_supported": ["ES256"]}}),
             ),
