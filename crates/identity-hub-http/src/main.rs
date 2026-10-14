@@ -78,10 +78,34 @@ struct CommonArgs {
     /// is normally sufficient.
     #[arg(long = "allow-resolve-host")]
     allow_resolve_host: Vec<String>,
+    /// OAuth client_id the OID4VCI wallet authenticates as (private_key_jwt,
+    /// signed with this service's DID key). Unset keeps the pre-authorized
+    /// code flow anonymous.
+    #[arg(long)]
+    oid4vci_client_id: Option<String>,
+    /// Mount the wallet's unauthenticated Credential Offer Endpoint
+    /// (`GET /oid4vci/wallet/credential_offer`). Off by default.
+    #[arg(long)]
+    oid4vci_offer_endpoint: bool,
+    /// Transaction Code the Credential Offer Endpoint answers a tx_code
+    /// prompt with (conformance testing).
+    #[arg(long)]
+    oid4vci_offer_tx_code: Option<String>,
+    /// Extra PEM trust anchor for outbound TLS (may be repeated).
+    #[arg(long = "extra-root-cert")]
+    extra_root_certs: Vec<std::path::PathBuf>,
 }
 
 impl CommonArgs {
     fn into_config(self, mode: Mode) -> Config {
+        let extra_root_certs = self
+            .extra_root_certs
+            .iter()
+            .map(|path| {
+                std::fs::read(path)
+                    .unwrap_or_else(|e| panic!("reading --extra-root-cert {}: {e}", path.display()))
+            })
+            .collect();
         let did_host = self
             .did_host
             .unwrap_or_else(|| format!("localhost:{}", self.bind.port()));
@@ -96,6 +120,10 @@ impl CommonArgs {
             trusted_issuer_dids: self.trusted_issuer_dids,
             known_holder_pids: self.known_holder_pids,
             allowed_outbound_hosts: self.allow_resolve_host,
+            oid4vci_client_id: self.oid4vci_client_id,
+            oid4vci_offer_endpoint: self.oid4vci_offer_endpoint,
+            oid4vci_offer_tx_code: self.oid4vci_offer_tx_code,
+            extra_root_certs,
         }
     }
 }

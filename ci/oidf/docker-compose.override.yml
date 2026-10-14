@@ -1,0 +1,18 @@
+# Layered on top of the conformance suite's own docker-compose-prebuilt.yml
+# (see run.sh). Two changes, both for the hub under test:
+#
+# - nginx serves a certificate for localhost.emobix.co.uk issued by a CA that
+#   run.sh generates and hands to the hub with --extra-root-cert. The image's
+#   built-in certificate is a self-signed CN=localhost one that no TLS client
+#   doing hostname verification accepts.
+# - the suite server can reach the hub on the runner host, because the suite's
+#   headless browser opens the hub's Credential Offer Endpoint
+#   (http://host.docker.internal:8090/oid4vci/wallet/credential_offer).
+services:
+  nginx:
+    volumes:
+      - ${OIDF_CERT_DIR}/server.crt:/etc/ssl/certs/nginx-selfsigned.crt:ro
+      - ${OIDF_CERT_DIR}/server.key:/etc/ssl/private/nginx-selfsigned.key:ro
+  server:
+    extra_hosts:
+      - "host.docker.internal:host-gateway"

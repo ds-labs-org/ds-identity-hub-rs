@@ -1373,9 +1373,11 @@ version = "0.1.0"
 dependencies = [
  "ds-dcp-core-rs",
  "identity-hub-graph",
+ "p256",
  "regex",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
  "thiserror 2.0.20",
  "uuid",
 ]
@@ -1396,6 +1398,7 @@ name = "identity-hub-http"
 version = "0.1.0"
 dependencies = [
  "axum",
+ "base64 0.22.1",
  "clap",
  "contreforts-core",
  "ds-dcp-core-rs",
@@ -1403,10 +1406,12 @@ dependencies = [
  "identity-hub-contreforts",
  "identity-hub-core",
  "identity-hub-graph",
+ "p256",
  "regex",
  "reqwest",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
  "testcontainers",
  "thiserror 2.0.20",
  "tokio",

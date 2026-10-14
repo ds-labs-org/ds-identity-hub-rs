@@ -12,6 +12,7 @@
 
 pub mod identity;
 pub mod messages;
+pub mod oid4vci;
 pub mod scope;
 pub mod store;
 pub mod sts;

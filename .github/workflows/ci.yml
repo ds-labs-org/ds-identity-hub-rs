@@ -17,6 +17,10 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v7
+        with:
+          # vendor/contreforts-core is a workspace member; without it cargo
+          # cannot even load the workspace manifest.
+          submodules: true
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -42,6 +46,10 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v7
+        with:
+          # vendor/contreforts-core is a workspace member; without it cargo
+          # cannot even load the workspace manifest.
+          submodules: true
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -62,3 +70,39 @@ jobs:
       # gates merges: any real regression fails it.
       - name: Run the DCP TCK conformance test
         run: cargo test -p identity-hub-http --test dcp_tck -- --ignored --nocapture
+
+  oid4vci-conformance:
+    name: OID4VCI wallet conformance (OpenID Foundation suite)
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          # vendor/contreforts-core is a workspace member; without it cargo
+          # cannot even load the workspace manifest.
+          submodules: true
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Build the hub
+        run: cargo build --release -p identity-hub-http --bin identity-hub
+
+      # Pulls the OpenID Foundation conformance suite (release-v5.3.3, its
+      # prebuilt images), runs it next to the hub, and drives the OID4VCI 1.0
+      # wallet test plan for the profile the hub implements: pre-authorized
+      # code, offer by value, private_key_jwt, DPoP, SD-JWT VC. See
+      # ci/oidf/run.sh and ARCHITECTURE.md, "OID4VCI wallet conformance".
+      - name: Run the OIDF OID4VCI wallet test plan
+        run: ci/oidf/run.sh
+
+      - name: Upload suite results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: oidf-oid4vci-wallet-results
+          path: |
+            target/oidf/results
+            target/oidf/hub.log
+          if-no-files-found: ignore

@@ -221,6 +221,10 @@ pub struct AppState {
     /// independent security audit, MEDIUM) - see `../../ARCHITECTURE.md`,
     /// "What's simplified or stubbed".
     pub seen_jti: Mutex<SeenJtiCache>,
+    /// OID4VCI Credential Issuer state (Issuer Service mode): offers,
+    /// pre-authorized codes, access tokens and `c_nonce`s - see
+    /// `crate::oid4vci`. Unused, and empty, in Credential Service mode.
+    pub oid4vci: crate::oid4vci::IssuerState,
 }
 
 impl AppState {
@@ -259,13 +263,21 @@ impl AppState {
         // `host.docker.internal` to be independently resolvable on the bare
         // host). `reqwest::ClientBuilder::resolve` overrides only the IP;
         // the port from the request URL is used unchanged.
-        let http = reqwest::Client::builder()
+        let mut http = reqwest::Client::builder()
             .connect_timeout(OUTBOUND_CONNECT_TIMEOUT)
             .timeout(OUTBOUND_REQUEST_TIMEOUT)
             .resolve(
                 HOST_DOCKER_INTERNAL,
                 std::net::SocketAddr::from(([127, 0, 0, 1], 0)),
-            )
+            );
+        // Operator-supplied trust anchors (`--extra-root-cert`), added to -
+        // never replacing - the built-in web roots.
+        for pem in &config.extra_root_certs {
+            let certificate = reqwest::Certificate::from_pem(pem)
+                .expect("--extra-root-cert is a PEM certificate");
+            http = http.add_root_certificate(certificate);
+        }
+        let http = http
             .build()
             .expect("reqwest client with a static host.docker.internal override builds");
 
@@ -309,6 +321,7 @@ impl AppState {
             http,
             outbound,
             seen_jti: Mutex::new(SeenJtiCache::new(MAX_SEEN_JTI)),
+            oid4vci: crate::oid4vci::IssuerState::default(),
         }
     }
 
