@@ -124,6 +124,13 @@ impl CommonArgs {
             oid4vci_offer_endpoint: self.oid4vci_offer_endpoint,
             oid4vci_offer_tx_code: self.oid4vci_offer_tx_code,
             extra_root_certs,
+            admin_bind: identity_hub_http::config::DEFAULT_ADMIN_BIND
+                .parse()
+                .expect("valid default admin bind"),
+            admin_token: None,
+            participant_context_id: identity_hub_http::config::DEFAULT_PARTICIPANT_CONTEXT_ID
+                .to_string(),
+            holder_approval: Default::default(),
         }
     }
 }

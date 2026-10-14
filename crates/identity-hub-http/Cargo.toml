@@ -30,6 +30,7 @@ reqwest = { workspace = true }
 regex = { workspace = true }
 clap = { workspace = true }
 base64 = { workspace = true }
+flate2 = { workspace = true }
 
 [dev-dependencies]
 # Runs the real `eclipsedataspacetck/dcp-tck-runtime` container in

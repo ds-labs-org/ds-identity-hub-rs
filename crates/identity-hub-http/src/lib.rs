@@ -26,6 +26,11 @@ pub fn build(config: Config) -> (Arc<AppState>, Router) {
     (state, router)
 }
 
+/// Builds the Issuer Admin API router - not implemented yet.
+pub fn build_admin(_state: &Arc<AppState>) -> Option<Router> {
+    None
+}
+
 /// Binds `config.bind_addr` and serves `router` until the process is
 /// stopped (or, in a test, until the returned future is dropped/aborted).
 pub async fn serve(config: &Config, router: Router) -> std::io::Result<()> {

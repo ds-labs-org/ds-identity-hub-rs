@@ -45,6 +45,8 @@ rand = "0.8"
 base64 = "0.22"
 regex = "1"
 clap = { version = "4", features = ["derive"] }
+# gzip for the StatusList2021 bitstring served by the Issuer Service.
+flate2 = "1"
 
 # Contreforts-backed semantic storage (crates/identity-hub-graph,
 # crates/identity-hub-contreforts) - versions matched to ds-sql-dps-rs's own
