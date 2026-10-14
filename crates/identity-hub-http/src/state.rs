@@ -104,6 +104,11 @@ impl SeenJtiCache {
     }
 }
 
+/// [`RequestTable::insert`] found the table full of non-evictable
+/// (SUBMITTED/APPROVED) processes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TableFull;
+
 /// A fixed-capacity, insertion-ordered table of [`IssuanceProcess`]es (one
 /// per accepted Credential Request), keyed by process id (the DCP
 /// `issuerPid`). Same shape as [`SeenJtiCache`]: O(1) lookup by id via the
@@ -135,20 +140,42 @@ impl RequestTable {
 
     /// Records a newly accepted Credential Request under `id`. `id` is
     /// always a freshly minted UUID at every call site, so this never
-    /// overwrites an existing entry. If the table is now over `capacity`,
-    /// evicts the oldest tracked request(s) first - the one just inserted is
-    /// never evicted by this call.
-    pub fn insert(&mut self, id: String, record: IssuanceProcess) {
-        self.records.insert(id.clone(), record);
-        self.order.push_back(id);
-        while self.records.len() > self.capacity {
-            match self.order.pop_front() {
+    /// overwrites an existing entry. When the table is at `capacity`, the
+    /// oldest *terminal* (DELIVERED/ERRORED/REJECTED) record is evicted to
+    /// make room. SUBMITTED processes wait on an operator decision and
+    /// APPROVED ones are mid-delivery, so neither is ever evicted by other
+    /// callers' traffic (review finding, 2026-10-14); if nothing is
+    /// evictable the new request is refused ([`TableFull`]) instead.
+    pub fn insert(&mut self, id: String, record: IssuanceProcess) -> Result<(), TableFull> {
+        while self.records.len() >= self.capacity {
+            let oldest_terminal = self.order.iter().position(|id| {
+                self.records
+                    .get(id)
+                    .is_none_or(|record| record.state.is_terminal())
+            });
+            match oldest_terminal.and_then(|position| self.order.remove(position)) {
                 Some(oldest) => {
                     self.records.remove(&oldest);
                 }
-                None => break,
+                None => return Err(TableFull),
             }
         }
+        self.records.insert(id.clone(), record);
+        self.order.push_back(id);
+        Ok(())
+    }
+
+    /// SUBMITTED processes of `holder_id`, and in total - for the pending
+    /// caps (`issuer::MAX_PENDING_PROCESSES_PER_HOLDER`,
+    /// `issuer::MAX_PENDING_PROCESSES`). A linear scan: the table is small
+    /// and bounded.
+    pub fn pending_counts(&self, holder_id: &str) -> (usize, usize) {
+        self.records
+            .values()
+            .filter(|p| p.state == crate::issuer::ProcessState::Submitted)
+            .fold((0, 0), |(mine, all), p| {
+                (mine + usize::from(p.holder_id == holder_id), all + 1)
+            })
     }
 
     pub fn get(&self, id: &str) -> Option<&IssuanceProcess> {

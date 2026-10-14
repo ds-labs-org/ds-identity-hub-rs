@@ -25,7 +25,8 @@ use crate::auth::{
 use crate::config::{HolderApproval, Mode};
 use crate::issuer::{
     CredentialDefinition, CredentialRecordStatus, Holder, HolderStatus, IssuanceProcess,
-    IssuedCredential, ProcessState, STATUS_LIST_CONTEXT, STATUS_LIST_PATH,
+    IssuedCredential, MAX_PENDING_PROCESSES, MAX_PENDING_PROCESSES_PER_HOLDER,
+    MAX_REQUEST_CREDENTIALS, ProcessState, STATUS_LIST_CONTEXT, STATUS_LIST_PATH,
 };
 use crate::state::AppState;
 use crate::validation::{
@@ -514,6 +515,18 @@ async fn credential_request(
         .and_then(Value::as_str)
         .map(|s| s.to_string());
 
+    // Deduplicated, first occurrence first: asking twice for the same
+    // definition in one request yields one credential, not two.
+    let mut requested_ids: Vec<String> = Vec::new();
+    for credential in &message.credentials {
+        if !requested_ids.contains(&credential.id) {
+            requested_ids.push(credential.id.clone());
+            if requested_ids.len() > MAX_REQUEST_CREDENTIALS {
+                break;
+            }
+        }
+    }
+
     let now = now_secs();
     let process_id = Uuid::new_v4().to_string();
     // Lock order: definitions -> holders -> requests (see `crate::issuer`).
@@ -521,17 +534,23 @@ async fn credential_request(
     // holder approval can never miss this process.
     let deliver_now = {
         let definitions = state.definitions.lock().expect("definitions lock poisoned");
-        if message.credentials.is_empty() {
+        if requested_ids.is_empty() {
             return (StatusCode::BAD_REQUEST, "credentials must not be empty").into_response();
         }
-        if let Some(unknown) = message
-            .credentials
+        if requested_ids.len() > MAX_REQUEST_CREDENTIALS {
+            return (
+                StatusCode::BAD_REQUEST,
+                format!("at most {MAX_REQUEST_CREDENTIALS} distinct credential ids per request"),
+            )
+                .into_response();
+        }
+        if let Some(unknown) = requested_ids
             .iter()
-            .find(|c| definitions.get(&c.id).is_none())
+            .find(|id| definitions.get(id).is_none())
         {
             return (
                 StatusCode::BAD_REQUEST,
-                format!("unknown credential id: '{}'", unknown.id),
+                format!("unknown credential id: '{unknown}'"),
             )
                 .into_response();
         }
@@ -572,29 +591,43 @@ async fn credential_request(
             HolderStatus::Pending => ProcessState::Submitted,
             HolderStatus::Approved => ProcessState::Approved,
         };
-        state
-            .requests
-            .lock()
-            .expect("requests lock poisoned")
-            .insert(
-                process_id.clone(),
-                IssuanceProcess {
-                    id: process_id.clone(),
-                    state: process_state,
-                    holder_id: holder.holder_id,
-                    holder_did,
-                    holder_pid: message.holder_pid.clone(),
-                    credential_definitions: message
-                        .credentials
-                        .iter()
-                        .map(|c| c.id.clone())
-                        .collect(),
-                    error_detail: None,
-                    created_at: now,
-                    state_timestamp: now,
-                    delivery_bearer,
-                },
-            );
+        let mut requests = state.requests.lock().expect("requests lock poisoned");
+        if process_state == ProcessState::Submitted {
+            // SUBMITTED processes are never evicted, so they are capped on
+            // their own: per holder, so one pending party cannot crowd out
+            // the others, and in total.
+            let (mine, all) = requests.pending_counts(&holder.holder_id);
+            if mine >= MAX_PENDING_PROCESSES_PER_HOLDER || all >= MAX_PENDING_PROCESSES {
+                return (
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "too many credential requests awaiting approval",
+                )
+                    .into_response();
+            }
+        }
+        let inserted = requests.insert(
+            process_id.clone(),
+            IssuanceProcess {
+                id: process_id.clone(),
+                state: process_state,
+                holder_id: holder.holder_id,
+                holder_did,
+                holder_pid: message.holder_pid.clone(),
+                credential_definitions: requested_ids,
+                error_detail: None,
+                created_at: now,
+                state_timestamp: now,
+                delivery_bearer,
+                delivery_started: false,
+            },
+        );
+        if inserted.is_err() {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                "too many credential requests in flight",
+            )
+                .into_response();
+        }
         process_state == ProcessState::Approved
     };
 
@@ -654,15 +687,18 @@ async fn deliver_issued_credential(state: Arc<AppState>, process_id: String) {
         .await
         .expect("delivery_semaphore is never closed");
 
-    let Some(process) = state
-        .requests
-        .lock()
-        .expect("requests lock poisoned")
-        .get(&process_id)
-        .cloned()
-    else {
-        // Evicted from the bounded table before delivery started.
-        return;
+    // Claim the process: only one still APPROVED (not rejected while it
+    // queued on the semaphore) is delivered, and once claimed a rejection
+    // no longer touches it.
+    let process = {
+        let mut requests = state.requests.lock().expect("requests lock poisoned");
+        match requests.get_mut(&process_id) {
+            Some(process) if process.state == ProcessState::Approved => {
+                process.delivery_started = true;
+                process.clone()
+            }
+            _ => return,
+        }
     };
     let definitions: Result<Vec<CredentialDefinition>, String> = {
         let catalog = state.definitions.lock().expect("definitions lock poisoned");
@@ -679,8 +715,10 @@ async fn deliver_issued_credential(state: Arc<AppState>, process_id: String) {
     };
     let outcome = match definitions {
         Ok(definitions) => {
-            try_deliver_issued_credential(
+            let mut allocated = Vec::new();
+            let outcome = try_deliver_issued_credential(
                 &state,
+                &mut allocated,
                 DeliveryJob {
                     process_id: process.id.clone(),
                     holder_id: process.holder_id.clone(),
@@ -690,7 +728,16 @@ async fn deliver_issued_credential(state: Arc<AppState>, process_id: String) {
                     definitions,
                 },
             )
-            .await
+            .await;
+            if outcome.is_err() {
+                // Nothing was issued: hand the indexes back (see
+                // `issuer::StatusList`).
+                let mut issued = state.issued.lock().expect("issued lock poisoned");
+                for index in allocated {
+                    issued.status_list.release(index);
+                }
+            }
+            outcome
         }
         Err(err) => Err(err),
     };
@@ -720,8 +767,11 @@ async fn deliver_issued_credential(state: Arc<AppState>, process_id: String) {
     }
 }
 
+/// `allocated` receives every status-list index taken, so the caller can
+/// release them if delivery fails.
 async fn try_deliver_issued_credential(
     state: &AppState,
+    allocated: &mut Vec<usize>,
     job: DeliveryJob,
 ) -> Result<Vec<IssuedCredential>, String> {
     let holder_did = job.holder_did.as_str();
@@ -757,6 +807,7 @@ async fn try_deliver_issued_credential(
             .ok_or(
                 "the revocation status list is exhausted; no further credentials can be issued",
             )?;
+        allocated.push(index);
         let minted = mint_credential(state, definition, holder_did, Some(index));
         containers.push(CredentialContainer {
             credential_type: definition.credential_type.clone(),

@@ -41,6 +41,17 @@ pub const MAX_CREDENTIAL_DEFINITIONS: usize = 256;
 /// Maximum number of holder records. A Credential Request from an unknown
 /// DID once full is refused `503` (contract: "Holders capped (4096)").
 pub const MAX_HOLDERS: usize = 4096;
+/// At most this many distinct credential ids in one DCP Credential Request
+/// (after deduplication); more is `400`. Each id costs one signature and
+/// one status-list index per delivery attempt.
+pub const MAX_REQUEST_CREDENTIALS: usize = 16;
+/// At most this many SUBMITTED (awaiting approval) processes per holder; a
+/// further request from that holder is `503` until the operator decides.
+pub const MAX_PENDING_PROCESSES_PER_HOLDER: usize = 8;
+/// At most this many SUBMITTED processes in total. SUBMITTED processes are
+/// never evicted (they wait on an operator), so they get their own cap,
+/// well under `state::MAX_TRACKED_REQUESTS`.
+pub const MAX_PENDING_PROCESSES: usize = 1024;
 /// QuerySpec `limit` ceiling: a single page never returns more than this.
 pub const MAX_QUERY_LIMIT: usize = 500;
 /// QuerySpec `limit` when the body leaves it out (EDC's own default).
@@ -375,6 +386,11 @@ impl ProcessState {
         }
     }
 
+    /// DELIVERED, ERRORED and REJECTED never change again.
+    pub fn is_terminal(self) -> bool {
+        !self.is_active()
+    }
+
     /// SUBMITTED and APPROVED still need their credential definitions.
     pub fn is_active(self) -> bool {
         matches!(self, ProcessState::Submitted | ProcessState::Approved)
@@ -401,6 +417,11 @@ pub struct IssuanceProcess {
     /// API: it is the holder's bearer credential.
     #[serde(skip)]
     pub delivery_bearer: Option<String>,
+    /// Set (under the requests lock) when the delivery task actually
+    /// starts, so rejecting the holder can still stop an APPROVED process
+    /// that is only queued behind the delivery semaphore.
+    #[serde(skip)]
+    pub delivery_started: bool,
 }
 
 impl IssuanceProcess {
@@ -437,11 +458,20 @@ pub struct IssuedCredential {
 }
 
 /// A StatusList2021 revocation bitstring: bit `i` is the most significant
-/// bit first of byte `i / 8`. Indexes are handed out sequentially and never
-/// reused, so a revoked index can never come back as a fresh credential's.
+/// bit first of byte `i / 8`. Indexes are handed out sequentially; an index
+/// whose delivery failed goes back to a free list and is handed out again
+/// first (lowest first), so a holder whose Storage API always fails cannot
+/// exhaust the list (review finding, 2026-10-14). That is safe because a
+/// bit is only ever set by revoking an issued-credential record, and a
+/// released index never got one: only indexes of credentials actually
+/// issued stay allocated. (If a Storage API answered non-2xx but kept the
+/// VC anyway, that VC may later share its index with a new credential;
+/// revoking the new one would then also make the unofficial copy read as
+/// revoked - fail-safe.)
 pub struct StatusList {
     bits: Vec<u8>,
     next_index: usize,
+    free: std::collections::BTreeSet<usize>,
     /// The last signed `StatusList2021Credential`, so the public, unauthenticated
     /// endpoint does not gzip and ECDSA-sign on every hit; dropped whenever
     /// a bit changes.
@@ -453,6 +483,7 @@ impl Default for StatusList {
         Self {
             bits: vec![0; STATUS_LIST_BITS / 8],
             next_index: 0,
+            free: Default::default(),
             cached_jwt: None,
         }
     }
@@ -462,10 +493,21 @@ impl StatusList {
     /// The next unused index, or `None` once all [`STATUS_LIST_BITS`] are
     /// spent (the issuer then refuses to issue rather than reuse one).
     pub fn allocate(&mut self) -> Option<usize> {
+        if let Some(index) = self.free.pop_first() {
+            return Some(index);
+        }
         (self.next_index < STATUS_LIST_BITS).then(|| {
             self.next_index += 1;
             self.next_index - 1
         })
+    }
+
+    /// Returns an index whose credential was never issued (failed
+    /// delivery) to the free list.
+    pub fn release(&mut self, index: usize) {
+        if index < self.next_index && !self.is_set(index) {
+            self.free.insert(index);
+        }
     }
 
     pub fn set(&mut self, index: usize) {
@@ -665,6 +707,20 @@ mod tests {
         };
         assert_eq!(list.allocate(), Some(STATUS_LIST_BITS - 1));
         assert_eq!(list.allocate(), None);
+        list.release(STATUS_LIST_BITS - 1);
+        assert_eq!(list.allocate(), Some(STATUS_LIST_BITS - 1));
+    }
+
+    #[test]
+    fn released_indexes_are_reused_lowest_first() {
+        let mut list = StatusList::default();
+        let indexes: Vec<_> = (0..4).map(|_| list.allocate().unwrap()).collect();
+        assert_eq!(indexes, [0, 1, 2, 3]);
+        list.release(2);
+        list.release(1);
+        assert_eq!(list.allocate(), Some(1));
+        assert_eq!(list.allocate(), Some(2));
+        assert_eq!(list.allocate(), Some(4));
     }
 
     #[test]

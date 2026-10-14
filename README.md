@@ -141,7 +141,10 @@ Request from a DID with no holder record does: `auto` creates the holder
 `approved` and delivers immediately (the DCP TCK flow, unchanged); `manual`
 creates it `pending` and the issuance process waits as `SUBMITTED` until an
 operator approves or rejects the holder. A rejected holder's requests are
-refused `403`; once 4096 holders exist, an unknown DID gets `503`.
+refused `403`; once 4096 holders exist, an unknown DID gets `503`. A
+request may name at most 16 distinct credential ids (`400` otherwise), and
+at most 8 requests per holder (1024 in total) may wait for approval at
+once (`503` otherwise).
 `GET /requests/{id}` maps SUBMITTED/APPROVED to `RECEIVED`, DELIVERED to
 `ISSUED`, and ERRORED/REJECTED to `REJECTED`.
 

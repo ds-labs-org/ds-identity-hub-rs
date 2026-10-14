@@ -1242,7 +1242,9 @@ What is real:
   returns a router only for an Issuer Service with a non-empty admin token
   (deny by default); `main.rs` serves it on `--admin-bind`, loopback by
   default. The bearer check runs before routing, with a constant-time
-  comparison, so unknown paths are `401` too. `{pc}` is decoded from any
+  comparison and a case-insensitive scheme name, so unknown paths are
+  `401` too; with the token, unknown paths, wrong methods and bad path
+  encodings all answer JSON `{"error"}` (404/405/400). `{pc}` is decoded from any
   base64 flavour and must equal `--participant-context-id`.
 - **Credential definitions** replace `AppState::supported_credential`. The
   catalog drives `GET /metadata`, the DCP Credential Request API (`400` on
@@ -1254,8 +1256,8 @@ What is real:
   waits as `SUBMITTED`; approving the holder moves every such process to
   `APPROVED` and spawns delivery through the same
   `deliver_issued_credential` path (and `delivery_semaphore`) as before;
-  rejecting moves them to `REJECTED` and refuses that DID's later requests
-  `403`. Status decisions and process transitions happen in one
+  rejecting moves them to `REJECTED` (and stops APPROVED ones still queued
+  for delivery) and refuses that DID's later requests `403`. Status decisions and process transitions happen in one
   holders -> requests critical section, so a request racing an approval is
   never stranded in `SUBMITTED`.
 - **Issuance processes** are the old request records, in the same bounded,
@@ -1270,12 +1272,38 @@ What is real:
   `StatusList2021Credential` signed with the issuer key, cached until the
   next revocation.
 
-Bounded like everything else reachable from outside: holders capped at
-`issuer::MAX_HOLDERS` (4096, refusal not eviction - forgetting a rejection
-would let that DID back in), definitions at `MAX_CREDENTIAL_DEFINITIONS`
-(256), issued-credential records by the status list's own size (once all
-131072 indexes are spent, deliveries fail `ERRORED` rather than reuse an
-index), query pages at 500 and filters at 16 criteria.
+Bounded like everything else reachable from outside:
+
+- **Holders: `issuer::MAX_HOLDERS` (4096), refusal not eviction.** Any
+  party that can host a `did:web` document creates a holder record just by
+  sending a Credential Request, so without a cap the registry is unbounded
+  memory growth. Eviction is not an option: forgetting a `rejected` record
+  would let that DID straight back in, and forgetting a `pending` one would
+  silently drop an operator's work item. The cost of refusal is a **DoS
+  lever**: whoever controls 4096 DIDs (cheap - one web server can host any
+  number of `did:web` paths) fills the registry, after which every
+  *new* DID gets `503` until an operator deletes records - which the
+  contract has no endpoint for yet, so in practice until restart.
+  Existing holders are unaffected. A real deployment would need holder
+  deletion/expiry of never-approved pending records, or rate limiting in
+  the gateway in front of the public API.
+- **Credential Requests: at most 16 distinct ids**
+  (`MAX_REQUEST_CREDENTIALS`, after deduplication), else `400`.
+- **Issuance processes.** The request table (`MAX_TRACKED_REQUESTS`)
+  evicts only terminal (DELIVERED/ERRORED/REJECTED) records, oldest first.
+  SUBMITTED processes wait on an operator and are never evicted by other
+  callers' traffic; instead they have their own caps - 8 per holder
+  (`MAX_PENDING_PROCESSES_PER_HOLDER`) and 1024 in total
+  (`MAX_PENDING_PROCESSES`) - over which a new request is `503`. APPROVED
+  processes are in flight and are not evicted either; if the table is ever
+  full of non-terminal records, a new request is `503`.
+- **Status list indexes** are reused when a delivery fails (lowest free
+  index first), so a holder whose Storage API always fails cannot exhaust
+  the list; a bit is only set by revoking an issued-credential record, so
+  an index that never got a record is safe to hand out again. Once all
+  131072 are held by issued credentials, deliveries fail `ERRORED`.
+- Definitions at `MAX_CREDENTIAL_DEFINITIONS` (256), query pages at 500,
+  filters at 16 criteria.
 
 Simplified or not implemented:
 
@@ -1289,15 +1317,26 @@ Simplified or not implemented:
   only status change, and it is permanent.
 - **Definitions are partly evaluated** - see the catalog entry in "What's
   simplified or stubbed".
-- **Status-list indexes are allocated sequentially**, which leaks issuance
-  order to anyone who can read the list; StatusList2021 recommends random
-  allocation.
+- **Status-list indexes are allocated sequentially** (reusing indexes of
+  failed deliveries first), which leaks issuance order to anyone who can
+  read the list; StatusList2021 recommends random allocation. If a holder's
+  Storage API answered non-2xx but kept the VC anyway, that VC's index may
+  later go to another credential; revoking that one would also make the
+  kept copy read as revoked, which fails safe.
 - **OID4VCI-issued credentials carry no `credentialStatus`** and are not
   recorded.
-- **Approval does not refresh the holder's access token.** With
-  `--holder-approval manual`, the `token` claim forwarded on delivery is
-  the one the holder sent with its request; if the operator approves after
-  it expired, the holder's Storage API may refuse the delivery (`ERRORED`).
+- **Stale token on manual approval.** With `--holder-approval manual`,
+  delivery forwards the `token` claim the holder sent with its original
+  request (DCP step 7). Those tokens are short-lived (typically 5 minutes),
+  and an operator may approve hours later, so a holder that checks the
+  forwarded token will refuse the delivery and the process ends `ERRORED`
+  (its status-list index is released). The holder then has to send a new
+  Credential Request, which, now that it is approved, is delivered at once.
+  Approval does not, and cannot, refresh the holder's token.
+- **Rejecting a holder** moves its SUBMITTED processes to `REJECTED`, and
+  also any APPROVED process whose delivery task has not started yet
+  (queued on the delivery semaphore); a delivery already in progress is
+  allowed to finish, and its credential can be revoked afterwards.
 
 ## What's out of scope for this bootstrap
 

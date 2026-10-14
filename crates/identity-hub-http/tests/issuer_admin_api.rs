@@ -1268,3 +1268,188 @@ async fn status_list_bit(hub: &Hub, index: usize) -> bool {
     assert_eq!(bits.len(), STATUS_LIST_BYTES);
     bits[index / 8] & (0x80 >> (index % 8)) != 0
 }
+
+// ---- review findings (2026-10-14 adversarial review) ----
+
+/// A failed delivery (and every duplicate id in one request) used to
+/// allocate status-list indexes that never got a record, so a `did:web`
+/// holder whose Storage API always fails could exhaust the list. Duplicate
+/// ids are now deduplicated and a failed delivery's indexes are reused.
+#[tokio::test]
+async fn failed_delivery_must_not_burn_status_list_indexes() {
+    let hub = spawn_hub(HolderApproval::Auto).await;
+    let bad = FakeHolder::spawn_with_storage_status("bad", AxumStatus::INTERNAL_SERVER_ERROR).await;
+    let ids = vec!["membership-credential"; 500];
+    let response = hub.request_credentials(&bad, "pid-bad", &ids).await;
+    assert_eq!(response.status(), StatusCode::CREATED);
+    let pid = Hub::process_id(&response);
+    let errored = hub.wait_for_process_state(&pid, "ERRORED").await;
+    assert_eq!(
+        errored["credentialDefinitions"],
+        json!(["membership-credential"]),
+        "duplicate ids are deduplicated"
+    );
+
+    let good = FakeHolder::spawn("good").await;
+    let response = hub
+        .request_credentials(&good, "pid-good", &["membership-credential"])
+        .await;
+    let pid = Hub::process_id(&response);
+    hub.wait_for_process_state(&pid, "DELIVERED").await;
+    let records = hub.query("credentials", json!({})).await;
+    assert_eq!(records.len(), 1);
+    assert_eq!(
+        records[0]["statusListIndex"],
+        json!(0),
+        "the ERRORED request (no record) must give its index back"
+    );
+}
+
+#[tokio::test]
+async fn credential_requests_are_capped_at_sixteen_distinct_ids() {
+    let hub = spawn_hub(HolderApproval::Auto).await;
+    let holder = FakeHolder::spawn("holder").await;
+    let ids: Vec<String> = (0..17).map(|i| format!("def-{i}")).collect();
+    for id in &ids {
+        let (status, _) = hub
+            .post(
+                "/credentialdefinitions",
+                json!({"id": id, "credentialType": "SomeCredential"}),
+            )
+            .await;
+        assert_eq!(status, StatusCode::CREATED);
+    }
+    let refs: Vec<&str> = ids.iter().map(String::as_str).collect();
+    let response = hub.request_credentials(&holder, "pid-17", &refs).await;
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let response = hub
+        .request_credentials(&holder, "pid-16", &refs[..16])
+        .await;
+    assert_eq!(response.status(), StatusCode::CREATED);
+    let process = hub
+        .wait_for_process_state(&Hub::process_id(&response), "DELIVERED")
+        .await;
+    assert_eq!(
+        process["credentialDefinitions"].as_array().unwrap().len(),
+        16
+    );
+    assert_eq!(
+        holder.deliveries()[0]["credentials"]
+            .as_array()
+            .unwrap()
+            .len(),
+        16
+    );
+}
+
+/// A pending holder's SUBMITTED process is a governance item waiting for the
+/// operator: other callers' traffic must not evict it. SUBMITTED processes
+/// are kept out of the request table's eviction and capped on their own
+/// (8 per holder), and other holders' terminal records are evicted instead.
+#[tokio::test]
+async fn submitted_process_survives_request_table_pressure() {
+    const MAX_TRACKED_REQUESTS: usize = 2048;
+    const MAX_PENDING_PER_HOLDER: usize = 8;
+    let hub = spawn_hub(HolderApproval::Manual).await;
+    let victim = FakeHolder::spawn("victim").await;
+    let response = hub
+        .request_credentials(&victim, "pid-victim", &["membership-credential"])
+        .await;
+    assert_eq!(response.status(), StatusCode::CREATED);
+    let victim_pid = Hub::process_id(&response);
+
+    // A pending flooder is held to its own small quota.
+    let pending_flooder = FakeHolder::spawn("pending-flooder").await;
+    for i in 0..MAX_PENDING_PER_HOLDER {
+        let r = hub
+            .request_credentials(
+                &pending_flooder,
+                &format!("p-{i}"),
+                &["membership-credential"],
+            )
+            .await;
+        assert_eq!(r.status(), StatusCode::CREATED);
+    }
+    let r = hub
+        .request_credentials(&pending_flooder, "p-over", &["membership-credential"])
+        .await;
+    assert_eq!(r.status(), StatusCode::SERVICE_UNAVAILABLE);
+
+    // An approved flooder fills the table with terminal records.
+    let flooder =
+        FakeHolder::spawn_with_storage_status("flooder", AxumStatus::INTERNAL_SERVER_ERROR).await;
+    let (status, _) = hub.post("/holders", json!({"did": flooder.did()})).await;
+    assert_eq!(status, StatusCode::CREATED);
+    let mut last = String::new();
+    for i in 0..MAX_TRACKED_REQUESTS {
+        let r = hub
+            .request_credentials(&flooder, &format!("f-{i}"), &["membership-credential"])
+            .await;
+        assert_eq!(r.status(), StatusCode::CREATED, "request {i}");
+        last = Hub::process_id(&r);
+    }
+    hub.wait_for_process_state(&last, "ERRORED").await;
+
+    let (status, body) = hub.get(&format!("/issuanceprocesses/{victim_pid}")).await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "pending holder's SUBMITTED process was evicted: {body}"
+    );
+    assert_eq!(body["state"], json!("SUBMITTED"));
+    assert!(hub.state.requests.lock().unwrap().len() <= MAX_TRACKED_REQUESTS);
+}
+
+/// Contract: "Errors are always JSON {\"error\": ...}" - including a wrong
+/// method on an existing admin route and an unknown admin path.
+#[tokio::test]
+async fn admin_wrong_method_and_unknown_path_answer_json_errors() {
+    let hub = spawn_hub(HolderApproval::Auto).await;
+    for (method, path, expected) in [
+        (
+            reqwest::Method::GET,
+            "/credentialdefinitions",
+            StatusCode::METHOD_NOT_ALLOWED,
+        ),
+        (
+            reqwest::Method::DELETE,
+            "/holders/query",
+            StatusCode::METHOD_NOT_ALLOWED,
+        ),
+        (
+            reqwest::Method::GET,
+            "/no-such-thing",
+            StatusCode::NOT_FOUND,
+        ),
+    ] {
+        let (status, body) = hub.admin_call(method.clone(), path, None).await;
+        assert_eq!(status, expected, "{method} {path}");
+        assert!(body["error"].is_string(), "{method} {path}: {body}");
+    }
+}
+
+/// Contract: "Errors are always JSON". An undecodable percent-escape in a
+/// path parameter used to come back as axum's text/plain 400.
+#[tokio::test]
+async fn admin_bad_path_encoding_answers_json_error() {
+    let hub = spawn_hub(HolderApproval::Auto).await;
+    let (status, body) = hub.get("/holders/%FF").await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(body["error"].is_string(), "{body}");
+}
+
+/// RFC 7235: the auth scheme name is case-insensitive.
+#[tokio::test]
+async fn admin_bearer_scheme_is_case_insensitive() {
+    let hub = spawn_hub(HolderApproval::Auto).await;
+    for scheme in ["bearer", "BEARER", "Bearer"] {
+        let response = hub
+            .client
+            .get(&hub.admin)
+            .header("Authorization", format!("{scheme} {ADMIN_TOKEN}"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK, "{scheme}");
+    }
+}

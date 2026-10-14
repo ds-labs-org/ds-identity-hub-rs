@@ -25,7 +25,8 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use axum::body::Bytes;
-use axum::extract::{Path, Request, State};
+use axum::extract::{FromRequestParts, Path, Request, State};
+use axum::http::request::Parts;
 use axum::http::{StatusCode, header};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
@@ -105,7 +106,13 @@ pub(crate) fn router(state: Arc<AppState>) -> Router {
             state.clone(),
             check_participant_context,
         ))
-        .fallback(|| async { error(StatusCode::NOT_FOUND, "no such admin endpoint") });
+        .fallback(|| async { error(StatusCode::NOT_FOUND, "no such admin endpoint") })
+        .method_not_allowed_fallback(|| async {
+            error(
+                StatusCode::METHOD_NOT_ALLOWED,
+                "method not allowed on this admin endpoint",
+            )
+        });
     routes
         // Runs before routing: every request, unknown paths included, needs
         // the token first.
@@ -186,13 +193,42 @@ async fn require_admin_token(
         .headers()
         .get(header::AUTHORIZATION)
         .and_then(|v| v.to_str().ok())
-        .and_then(|v| v.strip_prefix("Bearer "));
+        .and_then(bearer_token);
     match presented {
         Some(token) if constant_time_eq(token.as_bytes(), expected.as_bytes()) => {
             next.run(request).await
         }
         Some(_) => error(StatusCode::UNAUTHORIZED, "invalid admin token"),
         None => error(StatusCode::UNAUTHORIZED, "missing admin bearer token"),
+    }
+}
+
+/// The credentials of an `Authorization: Bearer <token>` header. The scheme
+/// name is case-insensitive (RFC 7235 section 2.1), so `bearer` and
+/// `BEARER` work too.
+fn bearer_token(value: &str) -> Option<&str> {
+    let (scheme, token) = value.split_once(' ')?;
+    scheme
+        .eq_ignore_ascii_case("bearer")
+        .then(|| token.trim_start_matches(' '))
+}
+
+/// `Path`, with rejections (e.g. an undecodable percent-escape) answered
+/// as the contract's JSON `400 {"error"}` instead of axum's text/plain.
+struct AdminPath<T>(T);
+
+impl<S, T> FromRequestParts<S> for AdminPath<T>
+where
+    S: Send + Sync,
+    T: DeserializeOwned + Send,
+{
+    type Rejection = Response;
+
+    async fn from_request_parts(parts: &mut Parts, state: &S) -> Result<Self, Response> {
+        Path::<T>::from_request_parts(parts, state)
+            .await
+            .map(|Path(value)| AdminPath(value))
+            .map_err(|rejection| error(StatusCode::BAD_REQUEST, rejection.body_text()))
     }
 }
 
@@ -210,7 +246,7 @@ fn decode_participant_context(encoded: &str) -> Option<String> {
 /// `--participant-context-id` is `404`, as if the context did not exist.
 async fn check_participant_context(
     State(state): State<Arc<AppState>>,
-    Path(params): Path<HashMap<String, String>>,
+    AdminPath(params): AdminPath<HashMap<String, String>>,
     request: Request,
     next: Next,
 ) -> Response {
@@ -272,7 +308,7 @@ async fn update_definition(State(state): State<Arc<AppState>>, body: Bytes) -> R
 
 async fn get_definition(
     State(state): State<Arc<AppState>>,
-    Path((_pc, id)): Path<(String, String)>,
+    AdminPath((_pc, id)): AdminPath<(String, String)>,
 ) -> Response {
     match state
         .definitions
@@ -292,7 +328,7 @@ async fn get_definition(
 /// definition: approving its holder later would otherwise deliver nothing.
 async fn delete_definition(
     State(state): State<Arc<AppState>>,
-    Path((_pc, id)): Path<(String, String)>,
+    AdminPath((_pc, id)): AdminPath<(String, String)>,
 ) -> Response {
     // Lock order: definitions -> requests (see `crate::issuer`).
     let mut catalog = state.definitions.lock().expect("definitions lock poisoned");
@@ -393,7 +429,7 @@ async fn update_holder(State(state): State<Arc<AppState>>, body: Bytes) -> Respo
 
 async fn get_holder(
     State(state): State<Arc<AppState>>,
-    Path((_pc, holder_id)): Path<(String, String)>,
+    AdminPath((_pc, holder_id)): AdminPath<(String, String)>,
 ) -> Response {
     match state
         .holders
@@ -420,7 +456,10 @@ async fn query_holders(State(state): State<Arc<AppState>>, body: Bytes) -> Respo
 /// Sets the holder's status and moves every SUBMITTED process of that
 /// holder to `next`, under one holders -> requests critical section so a
 /// Credential Request arriving concurrently is either seen here or sees the
-/// new status. Returns the holder and the ids of the moved processes.
+/// new status. A rejection also stops APPROVED processes whose delivery task
+/// has not claimed them yet (still queued on the delivery semaphore); one
+/// already delivering finishes. Returns the holder and the ids of the
+/// moved processes.
 fn decide_holder(
     state: &AppState,
     holder_id: &str,
@@ -439,7 +478,13 @@ fn decide_holder(
         .lock()
         .expect("requests lock poisoned")
         .iter_mut()
-        .filter(|p| p.holder_id == holder_id && p.state == ProcessState::Submitted)
+        .filter(|p| {
+            p.holder_id == holder_id
+                && (p.state == ProcessState::Submitted
+                    || (next == ProcessState::Rejected
+                        && p.state == ProcessState::Approved
+                        && !p.delivery_started))
+        })
     {
         process.transition(next, now);
         moved.push(process.id.clone());
@@ -449,7 +494,7 @@ fn decide_holder(
 
 async fn approve_holder(
     State(state): State<Arc<AppState>>,
-    Path((_pc, holder_id)): Path<(String, String)>,
+    AdminPath((_pc, holder_id)): AdminPath<(String, String)>,
 ) -> Response {
     match decide_holder(
         &state,
@@ -469,7 +514,7 @@ async fn approve_holder(
 
 async fn reject_holder(
     State(state): State<Arc<AppState>>,
-    Path((_pc, holder_id)): Path<(String, String)>,
+    AdminPath((_pc, holder_id)): AdminPath<(String, String)>,
 ) -> Response {
     match decide_holder(
         &state,
@@ -486,7 +531,7 @@ async fn reject_holder(
 
 async fn get_process(
     State(state): State<Arc<AppState>>,
-    Path((_pc, id)): Path<(String, String)>,
+    AdminPath((_pc, id)): AdminPath<(String, String)>,
 ) -> Response {
     match state
         .requests
@@ -525,7 +570,7 @@ async fn query_credentials(State(state): State<Arc<AppState>>, body: Bytes) -> R
 
 async fn credential_status(
     State(state): State<Arc<AppState>>,
-    Path((_pc, id)): Path<(String, String)>,
+    AdminPath((_pc, id)): AdminPath<(String, String)>,
 ) -> Response {
     match state.issued.lock().expect("issued lock poisoned").get(&id) {
         Some(record) => Json(json!({"status": record.status})).into_response(),
@@ -539,7 +584,7 @@ async fn credential_status(
 /// Idempotent: revoking a revoked credential answers the same record.
 async fn revoke_credential(
     State(state): State<Arc<AppState>>,
-    Path((_pc, id)): Path<(String, String)>,
+    AdminPath((_pc, id)): AdminPath<(String, String)>,
 ) -> Response {
     match state
         .issued
@@ -558,6 +603,15 @@ async fn revoke_credential(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bearer_scheme_is_case_insensitive() {
+        for header in ["Bearer tok", "bearer tok", "BEARER tok", "bEaReR  tok"] {
+            assert_eq!(bearer_token(header), Some("tok"), "{header}");
+        }
+        assert_eq!(bearer_token("Basic tok"), None);
+        assert_eq!(bearer_token("Bearertok"), None);
+    }
 
     #[test]
     fn constant_time_eq_is_plain_equality() {
