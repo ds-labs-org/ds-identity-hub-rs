@@ -325,7 +325,37 @@ pub fn build_jwt_proof(
     credential_issuer: &str,
     nonce: Option<&str>,
 ) -> String {
-    build_jwt_proof_for_client(key_pair, credential_issuer, nonce, None)
+    build_jwt_proof_for_client(
+        key_pair,
+        credential_issuer,
+        nonce,
+        None,
+        ProofKeyRef::DidUrl,
+    )
+}
+
+/// How a key proof names the key a credential gets bound to (Appendix F.1:
+/// exactly one of `kid` or `jwk`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProofKeyRef {
+    /// `kid` = this service's `did:web` key: the credential is bound to its
+    /// DID, which is what DCP presentation needs.
+    DidUrl,
+    /// `jwk` = the same key inline, for issuers that only bind to raw keys.
+    Jwk,
+}
+
+impl ProofKeyRef {
+    /// Picks the reference a credential configuration can bind to: the DID
+    /// whenever the issuer accepts a DID method (or states no restriction),
+    /// the bare key otherwise (e.g. `["jwk"]`).
+    pub fn for_binding_methods(methods: &[String]) -> Self {
+        if methods.is_empty() || methods.iter().any(|m| m == "did" || m.starts_with("did:")) {
+            ProofKeyRef::DidUrl
+        } else {
+            ProofKeyRef::Jwk
+        }
+    }
 }
 
 /// [`build_jwt_proof`], with `iss` set to `client_id` when the Wallet
@@ -336,6 +366,7 @@ pub fn build_jwt_proof_for_client(
     credential_issuer: &str,
     nonce: Option<&str>,
     client_id: Option<&str>,
+    key: ProofKeyRef,
 ) -> String {
     let mut payload = json!({
         "aud": credential_issuer,
@@ -347,11 +378,11 @@ pub fn build_jwt_proof_for_client(
     if let Some(client_id) = client_id {
         payload["iss"] = json!(client_id);
     }
-    sign_jws_with_header(
-        json!({"typ": PROOF_JWT_TYP, "kid": key_pair.own_key_id}),
-        &payload,
-        key_pair,
-    )
+    let header = match key {
+        ProofKeyRef::DidUrl => json!({"typ": PROOF_JWT_TYP, "kid": key_pair.own_key_id}),
+        ProofKeyRef::Jwk => json!({"typ": PROOF_JWT_TYP, "jwk": public_jwk(key_pair)}),
+    };
+    sign_jws_with_header(header, &payload, key_pair)
 }
 
 /// JOSE `typ` of a DPoP proof (RFC 9449 section 4.2).
@@ -533,6 +564,17 @@ mod tests {
 
     fn key_pair() -> DcpKeyPair {
         DcpKeyPair::generate("did:web:holder.example:credential-service".to_string())
+    }
+
+    #[test]
+    fn proof_key_follows_the_binding_methods() {
+        assert_eq!(ProofKeyRef::for_binding_methods(&[]), ProofKeyRef::DidUrl);
+        let did = vec!["did:web".to_string(), "jwk".to_string()];
+        assert_eq!(ProofKeyRef::for_binding_methods(&did), ProofKeyRef::DidUrl);
+        assert_eq!(
+            ProofKeyRef::for_binding_methods(&["jwk".to_string()]),
+            ProofKeyRef::Jwk
+        );
     }
 
     #[test]

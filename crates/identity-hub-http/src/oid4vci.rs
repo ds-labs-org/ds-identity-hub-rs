@@ -58,9 +58,9 @@ use identity_hub_core::oid4vci::{
     CREDENTIAL_ISSUER_WELL_KNOWN, CREDENTIAL_OFFER_SCHEME, CredentialConfiguration,
     CredentialDefinition, CredentialIssuerMetadata, CredentialOffer, CredentialRequest,
     CredentialResponse, ErrorResponse, FORMAT_JWT_VC_JSON, IssuedCredential, NonceResponse,
-    OfferGrants, PRE_AUTHORIZED_CODE_GRANT, PreAuthorizedCodeGrant, ProofKey, TokenResponse,
-    TxCodeDescription, build_client_assertion, build_dpop_proof, build_jwt_proof_for_client,
-    inspect_jwt_proof, well_known_url,
+    OfferGrants, PRE_AUTHORIZED_CODE_GRANT, PreAuthorizedCodeGrant, ProofKey, ProofKeyRef,
+    TokenResponse, TxCodeDescription, build_client_assertion, build_dpop_proof,
+    build_jwt_proof_for_client, inspect_jwt_proof, well_known_url,
 };
 use identity_hub_core::store::StoredCredentialBatch;
 
@@ -1108,6 +1108,9 @@ pub async fn redeem(
                 &metadata.credential_issuer,
                 c_nonce.as_deref(),
                 client_id,
+                ProofKeyRef::for_binding_methods(
+                    &configuration.cryptographic_binding_methods_supported,
+                ),
             );
             let mut request = target;
             request["proofs"] = json!({"jwt": [proof]});

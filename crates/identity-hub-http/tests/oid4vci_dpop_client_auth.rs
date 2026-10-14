@@ -37,6 +37,7 @@ struct Issuer {
     base: String,
     wallet_key: VerifyingKey,
     wallet_kid: String,
+    wallet_x: String,
     c_nonce: Option<String>,
     token_calls: usize,
     credential_calls: usize,
@@ -223,8 +224,11 @@ async fn credential(State(s): State<S>, headers: HeaderMap, Json(body): Json<Val
     let proof = body["proofs"]["jwt"][0].as_str().unwrap_or_default();
     let checked = dcp_core::decode_jws_unverified(proof).and_then(|(_, header, claims)| {
         dcp_core::verify_jws_signature(proof, &st.wallet_key)?;
+        // The configuration only binds to raw keys ("jwk"), so the proof
+        // carries the key inline instead of the DID URL.
         if header["typ"] != PROOF_JWT_TYP
-            || header["kid"] != st.wallet_kid.as_str()
+            || header.get("kid").is_some()
+            || header["jwk"]["x"] != st.wallet_x.as_str()
             || claims["iss"] != CLIENT_ID
             || claims["aud"] != st.base.as_str()
             || claims["nonce"].as_str() != st.c_nonce.as_deref()
@@ -261,6 +265,7 @@ async fn spawn_issuer(wallet: &AppState) -> (String, S) {
         base: base.clone(),
         wallet_key: *wallet.identity.key_pair.signing_key().verifying_key(),
         wallet_kid: wallet.identity.own_key_id().to_string(),
+        wallet_x: dcp_core::b64_encode(wallet.identity.key_pair.public_key_xy.0),
         c_nonce: None,
         token_calls: 0,
         credential_calls: 0,
