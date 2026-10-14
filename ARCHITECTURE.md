@@ -1170,10 +1170,50 @@ proof checks live in `identity-hub-core/src/oid4vci.rs`; routes in
   second operator secret, which shares the STS's known limitation of one
   hardcoded pair.
 
+- **Wallet against third-party issuers.** The wallet also speaks what
+  stricter issuers require. When the Authorization Server metadata lists
+  ES256 in `dpop_signing_alg_values_supported`, the token, nonce and
+  credential requests carry a DPoP proof (RFC 9449) signed with the hub's
+  DID key, and one `use_dpop_nonce` challenge per endpoint is answered. With
+  `--oid4vci-client-id` set, the wallet authenticates to the token endpoint
+  with `private_key_jwt` (RFC 7523: `iss` = `sub` = client_id, `aud` = the
+  AS issuer, `kid` = the hub's DID URL) and puts the client_id in its key
+  proofs' `iss`. `credential_identifiers` from the token response's
+  `authorization_details` are used in place of the configuration id.
+  Credentials in a format other than `jwt_vc_json` (for example SD-JWT VC)
+  are requested and received but not stored: the response lists them under
+  `not_stored`, because DCP can only present JWT VCs.
+- **Credential Offer Endpoint (off by default).** `--oid4vci-offer-endpoint`
+  mounts `GET /oid4vci/wallet/credential_offer?credential_offer=...` (or
+  `credential_offer_uri=...`), the wallet endpoint the spec lets an issuer
+  send offers to. It is unauthenticated by nature, so it only exists when
+  asked for; every request it makes still goes through `OutboundPolicy`,
+  and storage still requires a trusted issuer. `--oid4vci-offer-tx-code`
+  sets the Transaction Code it answers with (conformance testing only).
+  `--extra-root-cert` adds a PEM trust anchor for outbound TLS.
+
+### OID4VCI wallet conformance
+
+The `oid4vci-conformance` CI job (`ci/oidf/run.sh`) runs the OpenID
+Foundation conformance suite, pinned at `release-v5.3.3` and using its
+prebuilt images, next to a release build of the Credential Service, and
+drives the `oid4vci-1_0-wallet-test-plan` module
+`oid4vci-1_0-wallet-test-credential-issuance` with variants: pre-authorized
+code, offer by value, issuer initiated, `private_key_jwt`, DPoP, plain
+`vci` profile, `sd_jwt_vc`, unencrypted, immediate issuance. The suite acts
+as the issuer and delivers its offer to the hub's Credential Offer Endpoint
+through its headless browser. `ci/oidf/build-config.py` derives the plan
+config from the suite's own `vci-wallet-test-config-plain.json`, with the
+hub's DID key as `client.jwks`. The suite's nginx gets a certificate for
+`localhost.emobix.co.uk` from a throwaway CA the hub trusts via
+`--extra-root-cert`. The plan only offers `sd_jwt_vc` or `mdoc`, so this
+exercises the protocol exchange, not storage. The suite has not been run
+from the development sandbox (its registry and build dependencies were
+unreachable there); the CI job is its first run.
+
 Not done for OID4VCI: the Authorization Code flow, deferred and batch
-issuance, the Notification Endpoint, encrypted requests/responses, DPoP,
-formats other than `jwt_vc_json`, and a run against the OpenID Foundation's
-OID4VCI conformance suite (the equivalent of the DCP TCK run above).
+issuance, the Notification Endpoint, encrypted requests/responses, and
+storing formats other than `jwt_vc_json`.
 
 ## What's out of scope for this bootstrap
 
@@ -1372,7 +1412,7 @@ set, including a real-binary-spawn regression guard).
 
 ## Continuous integration
 
-`.github/workflows/ci.yml` runs two jobs on every push/PR to `main`:
+`.github/workflows/ci.yml` runs three jobs on every push/PR to `main`:
 
 - **`quality`** — `cargo fmt --all -- --check`, `cargo clippy --workspace
   --all-targets -- -D warnings`, `cargo test --workspace` (which does not
@@ -1385,6 +1425,8 @@ set, including a real-binary-spawn regression guard).
   an all-green expectation anywhere else — no categorized-failure-set
   bookkeeping is needed anymore now that there is nothing left to
   categorize (see "DCP TCK conformance snapshot").
+- **`oid4vci-conformance`** — the OpenID Foundation OID4VCI wallet test
+  plan against the Credential Service (see "OID4VCI wallet conformance").
 
 Unlike `ds-sql-dps-rs`'s pinned `dps-tck-runtime:1.3.0`, this job pins
 `dcp-tck-runtime:latest` — the exact version documented as available in

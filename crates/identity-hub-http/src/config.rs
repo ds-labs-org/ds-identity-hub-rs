@@ -112,6 +112,25 @@ pub struct Config {
     /// sufficient on its own. Wired to the repeatable `--allow-resolve-host`
     /// CLI flag.
     pub allowed_outbound_hosts: Vec<String>,
+    /// OAuth `client_id` the OID4VCI Wallet authenticates as at an issuer's
+    /// token endpoint, with an RFC 7523 `private_key_jwt` assertion signed
+    /// by this service's own DID key (`kid` = its DID URL). `None` (the
+    /// default) keeps the Pre-Authorized Code flow anonymous. Wired to
+    /// `--oid4vci-client-id`.
+    pub oid4vci_client_id: Option<String>,
+    /// Mounts the Wallet's unauthenticated Credential Offer Endpoint,
+    /// `GET /oid4vci/wallet/credential_offer` (see `crate::oid4vci`). Off by
+    /// default. Wired to `--oid4vci-offer-endpoint`.
+    pub oid4vci_offer_endpoint: bool,
+    /// Transaction Code that endpoint answers an offer's `tx_code` with,
+    /// since nobody is there to type one in. Meant for conformance testing,
+    /// where the test issuer's code is known in advance. Wired to
+    /// `--oid4vci-offer-tx-code`.
+    pub oid4vci_offer_tx_code: Option<String>,
+    /// Extra PEM trust anchors for this process's outbound TLS (e.g. a test
+    /// issuer's private CA), on top of the built-in web roots. Wired to the
+    /// repeatable `--extra-root-cert <path>`.
+    pub extra_root_certs: Vec<Vec<u8>>,
 }
 
 impl Config {
@@ -138,6 +157,10 @@ impl Config {
             trusted_issuer_dids: Vec::new(),
             known_holder_pids: Vec::new(),
             allowed_outbound_hosts: Vec::new(),
+            oid4vci_client_id: None,
+            oid4vci_offer_endpoint: false,
+            oid4vci_offer_tx_code: None,
+            extra_root_certs: Vec::new(),
         }
     }
 

@@ -47,7 +47,7 @@ pub fn router(state: Arc<AppState>) -> Router {
     // OID4VCI runs side by side with DCP on the same process: the Issuer
     // Service is also an OID4VCI Credential Issuer, the Credential Service
     // also an OID4VCI Wallet - see `crate::oid4vci`.
-    router = router.merge(crate::oid4vci::routes(state.mode()));
+    router = router.merge(crate::oid4vci::routes(&state.config));
 
     router.with_state(state)
 }

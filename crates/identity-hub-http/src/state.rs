@@ -263,13 +263,21 @@ impl AppState {
         // `host.docker.internal` to be independently resolvable on the bare
         // host). `reqwest::ClientBuilder::resolve` overrides only the IP;
         // the port from the request URL is used unchanged.
-        let http = reqwest::Client::builder()
+        let mut http = reqwest::Client::builder()
             .connect_timeout(OUTBOUND_CONNECT_TIMEOUT)
             .timeout(OUTBOUND_REQUEST_TIMEOUT)
             .resolve(
                 HOST_DOCKER_INTERNAL,
                 std::net::SocketAddr::from(([127, 0, 0, 1], 0)),
-            )
+            );
+        // Operator-supplied trust anchors (`--extra-root-cert`), added to -
+        // never replacing - the built-in web roots.
+        for pem in &config.extra_root_certs {
+            let certificate = reqwest::Certificate::from_pem(pem)
+                .expect("--extra-root-cert is a PEM certificate");
+            http = http.add_root_certificate(certificate);
+        }
+        let http = http
             .build()
             .expect("reqwest client with a static host.docker.internal override builds");
 

@@ -41,7 +41,7 @@
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
 
-use axum::extract::{Path, State};
+use axum::extract::{Path, Query, State};
 use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
@@ -54,17 +54,18 @@ use uuid::Uuid;
 use dcp_core::{Jwk, find_verifying_key, jwk_to_verifying_key, now_secs, resolve_did};
 use identity_hub_core::messages::CredentialContainer;
 use identity_hub_core::oid4vci::{
-    AUTHORIZATION_SERVER_WELL_KNOWN, AuthorizationServerMetadata, CREDENTIAL_ISSUER_WELL_KNOWN,
-    CREDENTIAL_OFFER_SCHEME, CredentialConfiguration, CredentialDefinition,
-    CredentialIssuerMetadata, CredentialOffer, CredentialRequest, CredentialResponse,
-    ErrorResponse, FORMAT_JWT_VC_JSON, IssuedCredential, NonceResponse, OfferGrants,
-    PRE_AUTHORIZED_CODE_GRANT, PreAuthorizedCodeGrant, ProofKey, TokenResponse, TxCodeDescription,
-    build_jwt_proof, inspect_jwt_proof, well_known_url,
+    AUTHORIZATION_SERVER_WELL_KNOWN, AuthorizationServerMetadata, CLIENT_ASSERTION_TYPE_JWT_BEARER,
+    CREDENTIAL_ISSUER_WELL_KNOWN, CREDENTIAL_OFFER_SCHEME, CredentialConfiguration,
+    CredentialDefinition, CredentialIssuerMetadata, CredentialOffer, CredentialRequest,
+    CredentialResponse, ErrorResponse, FORMAT_JWT_VC_JSON, IssuedCredential, NonceResponse,
+    OfferGrants, PRE_AUTHORIZED_CODE_GRANT, PreAuthorizedCodeGrant, ProofKey, TokenResponse,
+    TxCodeDescription, build_client_assertion, build_dpop_proof, build_jwt_proof_for_client,
+    inspect_jwt_proof, well_known_url,
 };
 use identity_hub_core::store::StoredCredentialBatch;
 
 use crate::auth::check_trusted_issuer;
-use crate::config::Mode;
+use crate::config::{Config, Mode};
 use crate::handlers::mint_supported_credential;
 use crate::state::AppState;
 use crate::validation::verify_credential_proofs;
@@ -180,8 +181,8 @@ impl Default for IssuerState {
     }
 }
 
-pub fn routes(mode: Mode) -> Router<Arc<AppState>> {
-    match mode {
+pub fn routes(config: &Config) -> Router<Arc<AppState>> {
+    match config.mode {
         Mode::IssuerService => Router::new()
             .route(
                 &format!("/.well-known/{CREDENTIAL_ISSUER_WELL_KNOWN}"),
@@ -197,7 +198,15 @@ pub fn routes(mode: Mode) -> Router<Arc<AppState>> {
             .route("/oid4vci/nonce", post(nonce))
             .route("/oid4vci/credential", post(credential)),
         Mode::CredentialService => {
-            Router::new().route("/oid4vci/wallet/offers", post(redeem_offer))
+            let router = Router::new().route("/oid4vci/wallet/offers", post(redeem_offer));
+            if config.oid4vci_offer_endpoint {
+                router.route(
+                    "/oid4vci/wallet/credential_offer",
+                    get(credential_offer_endpoint),
+                )
+            } else {
+                router
+            }
         }
     }
 }
@@ -329,6 +338,7 @@ async fn authorization_server_metadata(State(state): State<Arc<AppState>>) -> Re
         token_endpoint: format!("{base}/oid4vci/token"),
         grant_types_supported: vec![PRE_AUTHORIZED_CODE_GRANT.to_string()],
         pre_authorized_grant_anonymous_access_supported: Some(true),
+        dpop_signing_alg_values_supported: Vec::new(),
     })
     .into_response()
 }
@@ -547,6 +557,7 @@ async fn token(
             access_token,
             token_type: "Bearer".to_string(),
             expires_in: ACCESS_TOKEN_TTL_SECS,
+            authorization_details: Vec::new(),
         })
         .into_response(),
     )
@@ -724,10 +735,22 @@ pub struct RedeemedCredential {
     pub credential_type: String,
 }
 
+/// Credentials the issuer handed over but this service will not keep,
+/// because DCP cannot present their format.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct NotStoredCredential {
+    pub credential_configuration_id: String,
+    pub format: String,
+    pub count: usize,
+    pub reason: String,
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 pub struct RedeemOfferResponse {
     pub credential_issuer: String,
     pub stored: Vec<RedeemedCredential>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub not_stored: Vec<NotStoredCredential>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -762,7 +785,50 @@ async fn redeem_offer(
     if let Some(response) = operator_rejection(&state, &headers) {
         return response;
     }
-    match redeem(&state, body).await {
+    redemption_response(redeem(&state, body).await)
+}
+
+/// `GET /oid4vci/wallet/credential_offer` - the Wallet's own Credential
+/// Offer Endpoint (section 4.1): an issuer (or a user agent it redirects)
+/// delivers `credential_offer` or `credential_offer_uri` as a query
+/// parameter, and the offer is redeemed exactly as
+/// `POST /oid4vci/wallet/offers` would, with
+/// `Config::oid4vci_offer_tx_code` as the Transaction Code.
+///
+/// Unauthenticated by nature, so mounted only when
+/// `Config::oid4vci_offer_endpoint` is on (it is off by default). What an
+/// anonymous caller can make this service do stays bounded by the same
+/// gates as the operator route: it only ever contacts allow-listed hosts
+/// (`AppState::outbound`), and only stores credentials from trusted issuers
+/// that are bound to this service's own DID.
+async fn credential_offer_endpoint(
+    State(state): State<Arc<AppState>>,
+    Query(params): Query<HashMap<String, String>>,
+) -> Response {
+    let credential_offer = match params.get("credential_offer") {
+        Some(json) => match serde_json::from_str(json) {
+            Ok(offer) => Some(offer),
+            Err(e) => {
+                return oauth_error(
+                    StatusCode::BAD_REQUEST,
+                    "invalid_credential_offer",
+                    format!("credential_offer is not a Credential Offer: {e}"),
+                );
+            }
+        },
+        None => None,
+    };
+    let body = RedeemOfferBody {
+        offer: None,
+        credential_offer,
+        credential_offer_uri: params.get("credential_offer_uri").cloned(),
+        tx_code: state.config.oid4vci_offer_tx_code.clone(),
+    };
+    redemption_response(redeem(&state, body).await)
+}
+
+fn redemption_response(result: Result<RedeemOfferResponse, WalletError>) -> Response {
+    match result {
         Ok(result) => Json(result).into_response(),
         Err(err) => {
             tracing::warn!(error = %err, "OID4VCI offer redemption failed");
@@ -870,6 +936,21 @@ async fn resolve_offer(
 /// token, then for each offered configuration fetch a fresh `c_nonce`,
 /// prove possession of this Credential Service's own `did:web` key, and
 /// verify and store what comes back.
+///
+/// Two optional hardenings the issuer's metadata can ask for, so the same
+/// flow passes the OpenID Foundation's wallet conformance plan:
+/// - **DPoP** (RFC 9449): when the AS advertises `ES256` in
+///   `dpop_signing_alg_values_supported`, the token and every
+///   access-token-bearing call carry a DPoP proof signed with this
+///   service's key, and a `use_dpop_nonce` challenge is answered once.
+/// - **`private_key_jwt`** (RFC 7523): when `Config::oid4vci_client_id` is
+///   set, the token request authenticates as that client with an assertion
+///   signed by this service's DID key, and key proofs carry it as `iss`.
+///
+/// A configuration whose format is not `jwt_vc_json` is still requested,
+/// so the exchange completes, but its credentials are reported under
+/// `not_stored` and never written to the store: DCP can only present JWT
+/// VCs (`validation::verify_credential_proofs`).
 pub async fn redeem(
     state: &AppState,
     body: RedeemOfferBody,
@@ -909,6 +990,13 @@ pub async fn redeem(
         .map_err(WalletError::InvalidOffer)?;
     let as_metadata: AuthorizationServerMetadata = get_json(state, &as_metadata_url).await?;
 
+    let key_pair = &state.identity.key_pair;
+    let client_id = state.config.oid4vci_client_id.as_deref();
+    let use_dpop = as_metadata
+        .dpop_signing_alg_values_supported
+        .iter()
+        .any(|alg| alg == "ES256");
+
     let mut form = vec![
         ("grant_type", PRE_AUTHORIZED_CODE_GRANT.to_string()),
         ("pre-authorized_code", grant.pre_authorized_code.clone()),
@@ -918,23 +1006,70 @@ pub async fn redeem(
     {
         form.push(("tx_code", tx_code.clone()));
     }
-    let token_url = as_metadata.token_endpoint;
-    state
-        .outbound
-        .check_url(&token_url)
-        .map_err(|e| WalletError::Outbound(e.to_string()))?;
-    let token_response = state
-        .http
-        .post(&token_url)
-        .form(&form)
-        .send()
-        .await
-        .map_err(|e| WalletError::Upstream(format!("POST {token_url}: {e}")))?;
+    if let Some(client_id) = client_id {
+        form.push(("client_id", client_id.to_string()));
+        form.push((
+            "client_assertion_type",
+            CLIENT_ASSERTION_TYPE_JWT_BEARER.to_string(),
+        ));
+    }
+    let token_url = as_metadata.token_endpoint.clone();
+    check_outbound(state, &token_url)?;
+    let mut as_nonce: Option<String> = None;
+    let mut token_response = None;
+    for _ in 0..2 {
+        let mut attempt = form.clone();
+        if let Some(client_id) = client_id {
+            // A fresh assertion per attempt: its `jti` is single-use.
+            attempt.push((
+                "client_assertion",
+                build_client_assertion(key_pair, client_id, &as_metadata.issuer),
+            ));
+        }
+        let mut request = state.http.post(&token_url).form(&attempt);
+        if use_dpop {
+            request = request.header(
+                "DPoP",
+                build_dpop_proof(key_pair, "POST", &token_url, as_nonce.as_deref(), None),
+            );
+        }
+        let response = request
+            .send()
+            .await
+            .map_err(|e| WalletError::Upstream(format!("POST {token_url}: {e}")))?;
+        if use_dpop
+            && as_nonce.is_none()
+            && let Some(nonce) = dpop_nonce_challenge(&response)
+        {
+            as_nonce = Some(nonce);
+            continue;
+        }
+        token_response = Some(response);
+        break;
+    }
+    let token_response = token_response.ok_or_else(|| {
+        WalletError::Upstream(format!(
+            "POST {token_url}: repeated use_dpop_nonce challenge"
+        ))
+    })?;
     let token: TokenResponse = read_json(&token_url, token_response).await?;
+    let dpop_bound = token.token_type.eq_ignore_ascii_case("dpop");
+    if dpop_bound && !use_dpop {
+        return Err(WalletError::Upstream(
+            "token endpoint issued a DPoP-bound token the wallet did not ask for".to_string(),
+        ));
+    }
 
     let own_did = state.identity.own_did();
+    let mut resource = ResourceClient {
+        state,
+        access_token: &token.access_token,
+        dpop: dpop_bound,
+        nonce: None,
+    };
     let mut containers = Vec::new();
     let mut stored = Vec::new();
+    let mut not_stored = Vec::new();
     for config_id in &offer.credential_configuration_ids {
         let configuration = metadata
             .credential_configurations_supported
@@ -942,93 +1077,201 @@ pub async fn redeem(
             .ok_or_else(|| {
                 WalletError::Upstream(format!("issuer metadata does not describe '{config_id}'"))
             })?;
-        if configuration.format != FORMAT_JWT_VC_JSON {
-            return Err(WalletError::Rejected(format!(
-                "'{config_id}' uses format '{}', only {FORMAT_JWT_VC_JSON} is supported",
-                configuration.format
-            )));
-        }
-        let c_nonce = match &metadata.nonce_endpoint {
-            Some(nonce_url) => {
-                state
-                    .outbound
-                    .check_url(nonce_url)
-                    .map_err(|e| WalletError::Outbound(e.to_string()))?;
-                let response = state
-                    .http
-                    .post(nonce_url)
-                    .send()
-                    .await
-                    .map_err(|e| WalletError::Upstream(format!("POST {nonce_url}: {e}")))?;
-                let nonce: NonceResponse = read_json(nonce_url, response).await?;
-                Some(nonce.c_nonce)
-            }
-            None => None,
+        // Section 6.2: identifiers named by the token response replace the
+        // configuration id in the Credential Request.
+        let identifiers = token.credential_identifiers_for(config_id);
+        let targets: Vec<Value> = if identifiers.is_empty() {
+            vec![json!({"credential_configuration_id": config_id})]
+        } else {
+            identifiers
+                .iter()
+                .map(|id| json!({"credential_identifier": id}))
+                .collect()
         };
-        let proof = build_jwt_proof(
-            &state.identity.key_pair,
-            &metadata.credential_issuer,
-            c_nonce.as_deref(),
-        );
-        let credential_url = &metadata.credential_endpoint;
-        state
-            .outbound
-            .check_url(credential_url)
-            .map_err(|e| WalletError::Outbound(e.to_string()))?;
-        let response = state
-            .http
-            .post(credential_url)
-            .bearer_auth(&token.access_token)
-            .json(&json!({
-                "credential_configuration_id": config_id,
-                "proofs": {"jwt": [proof]},
-            }))
-            .send()
-            .await
-            .map_err(|e| WalletError::Upstream(format!("POST {credential_url}: {e}")))?;
-        let issued: CredentialResponse = read_json(credential_url, response).await?;
-        if issued.transaction_id.is_some() {
-            return Err(WalletError::Upstream(
-                "deferred issuance is not supported".to_string(),
-            ));
-        }
-        let credentials: Vec<Value> = issued
-            .credentials
-            .into_iter()
-            .map(|c| c.credential)
-            .chain(issued.credential)
-            .collect();
-        if credentials.is_empty() {
-            return Err(WalletError::Upstream(
-                "credential response carried no credential".to_string(),
-            ));
-        }
-        for credential in credentials {
-            let credential_type = accept_issued_credential(state, &credential, own_did).await?;
-            stored.push(RedeemedCredential {
-                credential_configuration_id: config_id.clone(),
-                credential_type: credential_type.clone(),
-            });
-            containers.push(CredentialContainer {
-                credential_type,
-                payload: credential,
-                format: FORMAT_JWT_VC_JSON.to_string(),
-            });
+        for target in targets {
+            let c_nonce =
+                match &metadata.nonce_endpoint {
+                    Some(nonce_url) => {
+                        check_outbound(state, nonce_url)?;
+                        let response =
+                            state.http.post(nonce_url).send().await.map_err(|e| {
+                                WalletError::Upstream(format!("POST {nonce_url}: {e}"))
+                            })?;
+                        resource.remember_nonce(&response);
+                        let nonce: NonceResponse = read_json(nonce_url, response).await?;
+                        Some(nonce.c_nonce)
+                    }
+                    None => None,
+                };
+            let proof = build_jwt_proof_for_client(
+                key_pair,
+                &metadata.credential_issuer,
+                c_nonce.as_deref(),
+                client_id,
+            );
+            let mut request = target;
+            request["proofs"] = json!({"jwt": [proof]});
+            let issued: CredentialResponse = resource
+                .post_json(&metadata.credential_endpoint, &request)
+                .await?;
+            if issued.transaction_id.is_some() {
+                return Err(WalletError::Upstream(
+                    "deferred issuance is not supported".to_string(),
+                ));
+            }
+            let credentials: Vec<Value> = issued
+                .credentials
+                .into_iter()
+                .map(|c| c.credential)
+                .chain(issued.credential)
+                .collect();
+            if credentials.is_empty() {
+                return Err(WalletError::Upstream(
+                    "credential response carried no credential".to_string(),
+                ));
+            }
+            if configuration.format != FORMAT_JWT_VC_JSON {
+                not_stored.push(NotStoredCredential {
+                    credential_configuration_id: config_id.clone(),
+                    format: configuration.format.clone(),
+                    count: credentials.len(),
+                    reason: format!(
+                        "only {FORMAT_JWT_VC_JSON} credentials can be presented over DCP"
+                    ),
+                });
+                continue;
+            }
+            for credential in credentials {
+                let credential_type = accept_issued_credential(state, &credential, own_did).await?;
+                stored.push(RedeemedCredential {
+                    credential_configuration_id: config_id.clone(),
+                    credential_type: credential_type.clone(),
+                });
+                containers.push(CredentialContainer {
+                    credential_type,
+                    payload: credential,
+                    format: FORMAT_JWT_VC_JSON.to_string(),
+                });
+            }
         }
     }
 
-    state.store.store(StoredCredentialBatch {
-        issuer_pid: format!("oid4vci:{}", Uuid::new_v4()),
-        holder_pid: None,
-        status: "ISSUED".to_string(),
-        rejection_reason: None,
-        credentials: containers,
-    });
-    tracing::info!(issuer = %offer.credential_issuer, count = stored.len(), "stored credentials redeemed over OID4VCI");
+    if !containers.is_empty() {
+        state.store.store(StoredCredentialBatch {
+            issuer_pid: format!("oid4vci:{}", Uuid::new_v4()),
+            holder_pid: None,
+            status: "ISSUED".to_string(),
+            rejection_reason: None,
+            credentials: containers,
+        });
+    }
+    tracing::info!(
+        issuer = %offer.credential_issuer,
+        stored = stored.len(),
+        not_stored = not_stored.len(),
+        "redeemed an OID4VCI offer"
+    );
     Ok(RedeemOfferResponse {
         credential_issuer: offer.credential_issuer,
         stored,
+        not_stored,
     })
+}
+
+fn check_outbound(state: &AppState, url: &str) -> Result<(), WalletError> {
+    state
+        .outbound
+        .check_url(url)
+        .map_err(|e| WalletError::Outbound(e.to_string()))
+}
+
+/// The `DPoP-Nonce` a server demanded, when `response` is a
+/// `use_dpop_nonce` challenge (RFC 9449 sections 8 and 9): a 400
+/// `{"error":"use_dpop_nonce"}` from an AS, or a 401 whose
+/// `WWW-Authenticate` names that error from a resource server.
+fn dpop_nonce_challenge(response: &reqwest::Response) -> Option<String> {
+    let nonce = response
+        .headers()
+        .get("DPoP-Nonce")
+        .and_then(|v| v.to_str().ok())?
+        .to_string();
+    let challenged = match response.status() {
+        reqwest::StatusCode::UNAUTHORIZED => response
+            .headers()
+            .get(header::WWW_AUTHENTICATE)
+            .and_then(|v| v.to_str().ok())
+            .is_some_and(|v| v.contains("use_dpop_nonce")),
+        // The AS signals it in the JSON body, which is not read here; a 400
+        // carrying a fresh DPoP-Nonce header is that challenge in practice.
+        reqwest::StatusCode::BAD_REQUEST => true,
+        _ => false,
+    };
+    challenged.then_some(nonce)
+}
+
+/// Calls the Credential Issuer's protected endpoints with the access token,
+/// as a Bearer token or DPoP-bound (with `ath` and the latest resource
+/// server `DPoP-Nonce`).
+struct ResourceClient<'a> {
+    state: &'a AppState,
+    access_token: &'a str,
+    dpop: bool,
+    nonce: Option<String>,
+}
+
+impl ResourceClient<'_> {
+    fn remember_nonce(&mut self, response: &reqwest::Response) {
+        if let Some(nonce) = response
+            .headers()
+            .get("DPoP-Nonce")
+            .and_then(|v| v.to_str().ok())
+        {
+            self.nonce = Some(nonce.to_string());
+        }
+    }
+
+    async fn post_json<T: serde::de::DeserializeOwned>(
+        &mut self,
+        url: &str,
+        body: &Value,
+    ) -> Result<T, WalletError> {
+        check_outbound(self.state, url)?;
+        for attempt in 0..2 {
+            let request = self.state.http.post(url).json(body);
+            let request = if self.dpop {
+                request
+                    .header(header::AUTHORIZATION, format!("DPoP {}", self.access_token))
+                    .header(
+                        "DPoP",
+                        build_dpop_proof(
+                            &self.state.identity.key_pair,
+                            "POST",
+                            url,
+                            self.nonce.as_deref(),
+                            Some(self.access_token),
+                        ),
+                    )
+            } else {
+                request.bearer_auth(self.access_token)
+            };
+            let response = request
+                .send()
+                .await
+                .map_err(|e| WalletError::Upstream(format!("POST {url}: {e}")))?;
+            if self.dpop
+                && attempt == 0
+                && let Some(nonce) = dpop_nonce_challenge(&response)
+            {
+                self.nonce = Some(nonce);
+                continue;
+            }
+            self.remember_nonce(&response);
+            return read_json(url, response).await;
+        }
+        Err(WalletError::Upstream(format!(
+            "POST {url}: repeated use_dpop_nonce challenge"
+        )))
+    }
 }
 
 /// Applies the same acceptance rules the DCP Storage API applies to a

@@ -75,6 +75,13 @@ wallet keeps the DCP side's posture: outbound allow-list on every request,
 and only credentials from a `--trusted-issuer-did`, genuinely signed and
 bound to this Credential Service's own DID, are stored.
 
+Against third-party issuers the wallet also uses DPoP when the issuer
+advertises it and `private_key_jwt` client authentication when started with
+`--oid4vci-client-id`. `--oid4vci-offer-endpoint` mounts the spec's
+Credential Offer Endpoint (`GET /oid4vci/wallet/credential_offer`), off by
+default. CI runs the OpenID Foundation conformance suite's OID4VCI wallet
+test plan against it (`ci/oidf/run.sh`).
+
 See [`ARCHITECTURE.md`](ARCHITECTURE.md) for exactly what's implemented,
 simplified, or out of scope, and for a real, date-stamped conformance run
 against the official

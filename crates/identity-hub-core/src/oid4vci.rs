@@ -24,6 +24,7 @@ use dcp_core::{DcpKeyPair, b64_encode, now_secs};
 use p256::ecdsa::{Signature, signature::Signer};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 
 /// `grant_type` value of the Pre-Authorized Code flow (section 4.1.1).
 pub const PRE_AUTHORIZED_CODE_GRANT: &str = "urn:ietf:params:oauth:grant-type:pre-authorized_code";
@@ -136,6 +137,10 @@ pub struct AuthorizationServerMetadata {
         skip_serializing_if = "Option::is_none"
     )]
     pub pre_authorized_grant_anonymous_access_supported: Option<bool>,
+    /// RFC 9449 section 5.1: present when the AS accepts DPoP proofs. A
+    /// Wallet that sees `ES256` here sender-constrains its token with DPoP.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub dpop_signing_alg_values_supported: Vec<String>,
 }
 
 // ---- Token / Nonce / Credential endpoints ----
@@ -145,7 +150,38 @@ pub struct AuthorizationServerMetadata {
 pub struct TokenResponse {
     pub access_token: String,
     pub token_type: String,
+    #[serde(default)]
     pub expires_in: u64,
+    /// `openid_credential` entries naming the `credential_identifiers` the
+    /// Credential Request must then use instead of the configuration id
+    /// (section 6.2). Never written by this hub's own Issuer Service.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub authorization_details: Vec<TokenAuthorizationDetail>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+pub struct TokenAuthorizationDetail {
+    #[serde(rename = "type")]
+    pub detail_type: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub credential_configuration_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub credential_identifiers: Vec<String>,
+}
+
+impl TokenResponse {
+    /// The credential identifiers the token response bound to
+    /// `configuration_id`, if any (section 6.2).
+    pub fn credential_identifiers_for(&self, configuration_id: &str) -> Vec<String> {
+        self.authorization_details
+            .iter()
+            .filter(|d| {
+                d.detail_type == "openid_credential"
+                    && d.credential_configuration_id.as_deref() == Some(configuration_id)
+            })
+            .flat_map(|d| d.credential_identifiers.iter().cloned())
+            .collect()
+    }
 }
 
 /// Nonce Response (section 7.2).
@@ -274,6 +310,18 @@ pub fn build_jwt_proof(
     credential_issuer: &str,
     nonce: Option<&str>,
 ) -> String {
+    build_jwt_proof_for_client(key_pair, credential_issuer, nonce, None)
+}
+
+/// [`build_jwt_proof`], with `iss` set to `client_id` when the Wallet
+/// authenticated to the token endpoint as that client (Appendix F.1: `iss`
+/// MUST be omitted only for anonymous Pre-Authorized Code access).
+pub fn build_jwt_proof_for_client(
+    key_pair: &DcpKeyPair,
+    credential_issuer: &str,
+    nonce: Option<&str>,
+    client_id: Option<&str>,
+) -> String {
     let mut payload = json!({
         "aud": credential_issuer,
         "iat": now_secs(),
@@ -281,9 +329,79 @@ pub fn build_jwt_proof(
     if let Some(nonce) = nonce {
         payload["nonce"] = json!(nonce);
     }
+    if let Some(client_id) = client_id {
+        payload["iss"] = json!(client_id);
+    }
     sign_jws_with_header(
         json!({"typ": PROOF_JWT_TYP, "kid": key_pair.own_key_id}),
         &payload,
+        key_pair,
+    )
+}
+
+/// JOSE `typ` of a DPoP proof (RFC 9449 section 4.2).
+pub const DPOP_JWT_TYP: &str = "dpop+jwt";
+/// `client_assertion_type` of RFC 7523 `private_key_jwt` client
+/// authentication.
+pub const CLIENT_ASSERTION_TYPE_JWT_BEARER: &str =
+    "urn:ietf:params:oauth:client-assertion-type:jwt-bearer";
+
+/// The public half of `key_pair` as a bare EC JWK, for a JOSE `jwk` header.
+fn public_jwk(key_pair: &DcpKeyPair) -> Value {
+    json!({
+        "kty": "EC",
+        "crv": "P-256",
+        "x": b64_encode(key_pair.public_key_xy.0),
+        "y": b64_encode(key_pair.public_key_xy.1),
+    })
+}
+
+/// A DPoP proof JWT (RFC 9449 section 4.2) for one HTTP request: `htm` and
+/// `htu` name the request (`htu` without query or fragment), `nonce` is the
+/// server-supplied `DPoP-Nonce` when one was demanded, and `access_token`
+/// - when the request carries one - is bound through `ath`.
+pub fn build_dpop_proof(
+    key_pair: &DcpKeyPair,
+    htm: &str,
+    htu: &str,
+    nonce: Option<&str>,
+    access_token: Option<&str>,
+) -> String {
+    let htu = htu.split(['?', '#']).next().unwrap_or(htu);
+    let mut payload = json!({
+        "jti": uuid::Uuid::new_v4().to_string(),
+        "htm": htm,
+        "htu": htu,
+        "iat": now_secs(),
+    });
+    if let Some(nonce) = nonce {
+        payload["nonce"] = json!(nonce);
+    }
+    if let Some(token) = access_token {
+        payload["ath"] = json!(b64_encode(Sha256::digest(token.as_bytes())));
+    }
+    sign_jws_with_header(
+        json!({"typ": DPOP_JWT_TYP, "jwk": public_jwk(key_pair)}),
+        &payload,
+        key_pair,
+    )
+}
+
+/// An RFC 7523 `private_key_jwt` client assertion: `iss` and `sub` are
+/// `client_id`, `aud` the Authorization Server's issuer identifier (as
+/// FAPI 2.0 requires), signed with `key_pair` under its DID-URL `kid`.
+pub fn build_client_assertion(key_pair: &DcpKeyPair, client_id: &str, audience: &str) -> String {
+    let now = now_secs();
+    sign_jws_with_header(
+        json!({"typ": "JWT", "kid": key_pair.own_key_id}),
+        &json!({
+            "iss": client_id,
+            "sub": client_id,
+            "aud": audience,
+            "jti": uuid::Uuid::new_v4().to_string(),
+            "iat": now,
+            "exp": now + 60,
+        }),
         key_pair,
     )
 }
