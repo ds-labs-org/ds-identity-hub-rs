@@ -6,6 +6,11 @@ use identity_hub_core::scope::DEFAULT_SCOPE_PATTERN;
 /// both VPP and CIP obligations; a minimal Issuer Service has CIP
 /// obligations only - see `../../ARCHITECTURE.md` and the real
 /// `eclipse-dataspacetck/dcp-tck`'s own SUT matrix.
+/// Default `--admin-bind`: loopback only.
+pub const DEFAULT_ADMIN_BIND: &str = "127.0.0.1:8182";
+/// Default `--participant-context-id`.
+pub const DEFAULT_PARTICIPANT_CONTEXT_ID: &str = "issuer";
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Mode {
     CredentialService,
@@ -19,6 +24,20 @@ impl Mode {
             Mode::IssuerService => "issuer-service",
         }
     }
+}
+
+/// What happens to a DCP Credential Request from a DID the Issuer Service
+/// has no holder record for (`--holder-approval`). See the Issuer Admin API
+/// section of `../../README.md`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, clap::ValueEnum)]
+pub enum HolderApproval {
+    /// The holder is created `approved` and the credential is delivered
+    /// immediately - the behaviour the DCP TCK expects, hence the default.
+    #[default]
+    Auto,
+    /// The holder is created `pending`; its requests wait as `SUBMITTED`
+    /// until an operator approves or rejects it on the admin API.
+    Manual,
 }
 
 #[derive(Debug, Clone)]
@@ -131,6 +150,19 @@ pub struct Config {
     /// issuer's private CA), on top of the built-in web roots. Wired to the
     /// repeatable `--extra-root-cert <path>`.
     pub extra_root_certs: Vec<Vec<u8>>,
+    /// Where the Issuer Admin API listens (`--admin-bind`). Loopback by
+    /// default: it is an operator surface, never meant to share the public
+    /// DCP listener's exposure.
+    pub admin_bind: SocketAddr,
+    /// Bearer token every Issuer Admin API request must carry
+    /// (`--admin-token` / `IDENTITY_HUB_ADMIN_TOKEN`). `None` means no admin
+    /// listener at all - deny by default.
+    pub admin_token: Option<String>,
+    /// The one participant context this single-tenant hub answers to on the
+    /// admin API's `{pc}` path segment (`--participant-context-id`).
+    pub participant_context_id: String,
+    /// `--holder-approval`: see [`HolderApproval`].
+    pub holder_approval: HolderApproval,
 }
 
 impl Config {
@@ -161,6 +193,12 @@ impl Config {
             oid4vci_offer_endpoint: false,
             oid4vci_offer_tx_code: None,
             extra_root_certs: Vec::new(),
+            admin_bind: DEFAULT_ADMIN_BIND
+                .parse()
+                .expect("valid default admin bind"),
+            admin_token: None,
+            participant_context_id: DEFAULT_PARTICIPANT_CONTEXT_ID.to_string(),
+            holder_approval: HolderApproval::Auto,
         }
     }
 

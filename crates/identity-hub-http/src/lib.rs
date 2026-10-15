@@ -2,9 +2,11 @@
 //! for scope, and `tests/dcp_tck.rs` for the real, official `dcp-tck`
 //! conformance test this crate is checked against.
 
+mod admin;
 pub mod auth;
 pub mod config;
 mod handlers;
+pub mod issuer;
 pub mod oid4vci;
 pub mod outbound;
 pub mod state;
@@ -24,6 +26,19 @@ pub fn build(config: Config) -> (Arc<AppState>, Router) {
     let state = Arc::new(AppState::new(config));
     let router = handlers::router(state.clone());
     (state, router)
+}
+
+/// Builds the Issuer Admin API router (see `admin`), to be served on its
+/// own listener (`Config::admin_bind`). `None` - no admin surface at all -
+/// unless this is an Issuer Service *and* a non-empty admin token is
+/// configured: deny by default.
+pub fn build_admin(state: &Arc<AppState>) -> Option<Router> {
+    let has_token = state
+        .config
+        .admin_token
+        .as_deref()
+        .is_some_and(|t| !t.is_empty());
+    (state.mode() == Mode::IssuerService && has_token).then(|| admin::router(state.clone()))
 }
 
 /// Binds `config.bind_addr` and serves `router` until the process is

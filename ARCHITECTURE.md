@@ -400,8 +400,9 @@ see "DCP TCK conformance snapshot" below, which is unchanged by this work
   stubbed").
 - **The Credential Request API and asynchronous delivery** (`POST
   /credentials` on an Issuer Service) — validates the incoming Self-Issued
-  ID Token, checks the requested credential id(s) against this bootstrap's
-  one supported `CredentialObject` (`MembershipCredential`), responds `201
+  ID Token, checks the requested credential id(s) against the credential
+  catalog (see "Issuer Admin API" below), applies the holder approval
+  policy, responds `201
   Created` with a `Location` header, and — asynchronously, matching the
   spec's own described flow — resolves the requesting holder's `did:web`
   document, mints a real signed Verifiable Credential, and delivers it via
@@ -410,7 +411,9 @@ see "DCP TCK conformance snapshot" below, which is unchanged by this work
   `token` claim per the spec, when present).
 - **The Credential Request Status API** (`GET /requests/<id>`) and
   **Issuer Metadata API** (`GET /metadata`) on an Issuer Service — real,
-  reflecting the in-memory request-tracking state above.
+  reflecting the in-memory issuance-process state and credential catalog.
+- **The Issuer Admin API and StatusList2021 revocation** (2026-10-14) — see
+  "Issuer Admin API" below.
 - **The embedded STS** (`POST /sts/token`) — a real OAuth2
   `client_credentials`-grant-shaped endpoint (one hardcoded client
   id/secret pair) that mints a genuinely ES256-signed Self-Issued ID Token,
@@ -1111,8 +1114,13 @@ including the first (wrong) fixes tried along the way).
   asserts the off-switch reaches `insecure_http == false` /
   `scheme() == "https"` / an `https://`-prefixed `base_url()` for both
   subcommands, and that the bare-invocation default is unchanged for both.
-- **The Issuer Service supports exactly one hardcoded `CredentialObject`**
-  (`MembershipCredential`), not a configurable catalog.
+- **The Issuer Service's credential catalog is in memory and only partly
+  evaluated** (2026-10-14; previously one hardcoded `CredentialObject`).
+  Definitions are editable on the Issuer Admin API, but only `id`,
+  `credentialType`, `format` (`VC1_0_JWT` only) and `validity` affect what
+  is issued; `jsonSchema`/`jsonSchemaUrl`/`mappings`/`rules`/`attestations`
+  are stored and echoed, never evaluated, so every issued credential's
+  subject is just `{"id": <holder DID>}`. See "Issuer Admin API".
 - **Keys are generated fresh on every process start**, never persisted —
   safe for a self-hosted `did:web` identity (the document is served by the
   same process that signs with the key), matching `ds-dcp-core-rs`'s own
@@ -1135,11 +1143,13 @@ proof checks live in `identity-hub-core/src/oid4vci.rs`; routes in
   Credential Issuer Identifier is the service's base URL; it is its own
   Authorization Server (no `authorization_servers` in its metadata, RFC 8414
   metadata at `/.well-known/oauth-authorization-server`). One configuration,
-  `membership-credential`, format `jwt_vc_json`, derived from the same
-  `AppState::supported_credential` the DCP Issuer Metadata API serves, and
-  signed by the same `handlers::mint_supported_credential` the DCP delivery
-  path now calls, so the two protocols issue byte-for-byte the same kind of
-  credential. Key proofs must be `typ: openid4vci-proof+jwt`, ES256, `aud`
+  `membership-credential` by default - one configuration per entry of the
+  same credential catalog (`AppState::definitions`) the DCP Issuer Metadata
+  API serves, format `jwt_vc_json`, signed by the same
+  `handlers::mint_credential` the DCP delivery path calls, so the two
+  protocols issue the same kind of credential - except that OID4VCI-issued
+  credentials carry no `credentialStatus`: they are not recorded as issued
+  credentials, so nothing could revoke them. Key proofs must be `typ: openid4vci-proof+jwt`, ES256, `aud`
   equal to the issuer identifier, `iat` within 300 s (30 s skew), and carry a
   single-use `c_nonce` from `POST /oid4vci/nonce`. The holder key is either a
   `did:web` `kid` (resolved through `AppState::outbound`, exactly like DCP
@@ -1215,6 +1225,119 @@ Not done for OID4VCI: the Authorization Code flow, deferred and batch
 issuance, the Notification Endpoint, encrypted requests/responses, and
 storing formats other than `jwt_vc_json`.
 
+## Issuer Admin API
+
+**2026-10-14.** Issuer-service mode gains the operator API the governance
+console (`ds-authority-governance-ui`) drives, implementing
+`governance/api-contract.md` section 1 - shaped like Eclipse EDC
+IdentityHub's Issuer Admin API `v1alpha`. Routes in
+`identity-hub-http/src/admin.rs`, state in `identity-hub-http/src/issuer.rs`,
+end-to-end coverage (real `did:web` holder with a Storage API) in
+`identity-hub-http/tests/issuer_admin_api.rs`. Flags and the endpoint table
+are in `README.md`.
+
+What is real:
+
+- **A separate, token-gated listener.** `identity_hub_http::build_admin`
+  returns a router only for an Issuer Service with a non-empty admin token
+  (deny by default); `main.rs` serves it on `--admin-bind`, loopback by
+  default. The bearer check runs before routing, with a constant-time
+  comparison and a case-insensitive scheme name, so unknown paths are
+  `401` too; with the token, unknown paths, wrong methods and bad path
+  encodings all answer JSON `{"error"}` (404/405/400). `{pc}` is decoded from any
+  base64 flavour and must equal `--participant-context-id`.
+- **Credential definitions** replace `AppState::supported_credential`. The
+  catalog drives `GET /metadata`, the DCP Credential Request API (`400` on
+  an unknown id), and the OID4VCI credential configurations. Deleting a
+  definition still needed by a SUBMITTED or APPROVED process is `409`.
+- **Holders and approval.** A DCP request from a DID with no holder record
+  creates one, `approved` (`--holder-approval auto`, the default and the
+  TCK's flow) or `pending` (`manual`). A pending holder's issuance process
+  waits as `SUBMITTED`; approving the holder moves every such process to
+  `APPROVED` and spawns delivery through the same
+  `deliver_issued_credential` path (and `delivery_semaphore`) as before;
+  rejecting moves them to `REJECTED` (and stops APPROVED ones still queued
+  for delivery) and refuses that DID's later requests `403`. Status decisions and process transitions happen in one
+  holders -> requests critical section, so a request racing an approval is
+  never stranded in `SUBMITTED`.
+- **Issuance processes** are the old request records, in the same bounded,
+  oldest-evicted `RequestTable` (`MAX_TRACKED_REQUESTS`). A process is
+  `DELIVERED` when the holder's Storage API accepts the `CredentialMessage`,
+  `ERRORED` (with `errorDetail`) on any failure. DCP `GET /requests/{id}`
+  maps them onto RECEIVED/ISSUED/REJECTED.
+- **Issued credentials and revocation.** Each successfully delivered VC
+  gets a record and a sequential, never-reused index in a 131072-bit
+  StatusList2021 list; the VC carries the matching `StatusList2021Entry`.
+  `GET /statuslist/revocation` (public API) serves the list as a JWT
+  `StatusList2021Credential` signed with the issuer key, cached until the
+  next revocation.
+
+Bounded like everything else reachable from outside:
+
+- **Holders: `issuer::MAX_HOLDERS` (4096), refusal not eviction.** Any
+  party that can host a `did:web` document creates a holder record just by
+  sending a Credential Request, so without a cap the registry is unbounded
+  memory growth. Eviction is not an option: forgetting a `rejected` record
+  would let that DID straight back in, and forgetting a `pending` one would
+  silently drop an operator's work item. The cost of refusal is a **DoS
+  lever**: whoever controls 4096 DIDs (cheap - one web server can host any
+  number of `did:web` paths) fills the registry, after which every
+  *new* DID gets `503` until an operator deletes records - which the
+  contract has no endpoint for yet, so in practice until restart.
+  Existing holders are unaffected. A real deployment would need holder
+  deletion/expiry of never-approved pending records, or rate limiting in
+  the gateway in front of the public API.
+- **Credential Requests: at most 16 distinct ids**
+  (`MAX_REQUEST_CREDENTIALS`, after deduplication), else `400`.
+- **Issuance processes.** The request table (`MAX_TRACKED_REQUESTS`)
+  evicts only terminal (DELIVERED/ERRORED/REJECTED) records, oldest first.
+  SUBMITTED processes wait on an operator and are never evicted by other
+  callers' traffic; instead they have their own caps - 8 per holder
+  (`MAX_PENDING_PROCESSES_PER_HOLDER`) and 1024 in total
+  (`MAX_PENDING_PROCESSES`) - over which a new request is `503`. APPROVED
+  processes are in flight and are not evicted either; if the table is ever
+  full of non-terminal records, a new request is `503`.
+- **Status list indexes** are reused when a delivery fails (lowest free
+  index first), so a holder whose Storage API always fails cannot exhaust
+  the list; a bit is only set by revoking an issued-credential record, so
+  an index that never got a record is safe to hand out again. Once all
+  131072 are held by issued credentials, deliveries fail `ERRORED`.
+- Definitions at `MAX_CREDENTIAL_DEFINITIONS` (256), query pages at 500,
+  filters at 16 criteria.
+
+Simplified or not implemented:
+
+- **In memory only.** Definitions (beyond the seed), holders, processes,
+  issued-credential records and the status list are lost on restart - and
+  the issuer key is regenerated anyway (see "Keys are generated fresh"),
+  so previously issued VCs would not verify after a restart regardless.
+- **Single tenant.** One participant context; there is no participant
+  CRUD, only `GET /v1alpha/participants/{pc}`.
+- **Suspend/resume are not implemented** (not routed); revocation is the
+  only status change, and it is permanent.
+- **Definitions are partly evaluated** - see the catalog entry in "What's
+  simplified or stubbed".
+- **Status-list indexes are allocated sequentially** (reusing indexes of
+  failed deliveries first), which leaks issuance order to anyone who can
+  read the list; StatusList2021 recommends random allocation. If a holder's
+  Storage API answered non-2xx but kept the VC anyway, that VC's index may
+  later go to another credential; revoking that one would also make the
+  kept copy read as revoked, which fails safe.
+- **OID4VCI-issued credentials carry no `credentialStatus`** and are not
+  recorded.
+- **Stale token on manual approval.** With `--holder-approval manual`,
+  delivery forwards the `token` claim the holder sent with its original
+  request (DCP step 7). Those tokens are short-lived (typically 5 minutes),
+  and an operator may approve hours later, so a holder that checks the
+  forwarded token will refuse the delivery and the process ends `ERRORED`
+  (its status-list index is released). The holder then has to send a new
+  Credential Request, which, now that it is approved, is delivered at once.
+  Approval does not, and cannot, refresh the holder's token.
+- **Rejecting a holder** moves its SUBMITTED processes to `REJECTED`, and
+  also any APPROVED process whose delivery task has not started yet
+  (queued on the delivery semaphore); a delivery already in progress is
+  allowed to finish, and its credential can be revoked afterwards.
+
 ## What's out of scope for this bootstrap
 
 - **The Verifier role.** This project never queries anyone else's
@@ -1227,8 +1350,10 @@ storing formats other than `jwt_vc_json`.
 - **A holder-driven response to a Credential Offer.** `POST /offers`
   acknowledges an offer; nothing follows up with a `CredentialRequestMessage`
   in response.
-- **Key rotation and revocation**, both described non-normatively by the
-  spec (`credential.issuance.protocol.md`, "Key Rotation and Revocation").
+- **Key rotation**, described non-normatively by the spec
+  (`credential.issuance.protocol.md`, "Key Rotation and Revocation").
+  Credential revocation is implemented (StatusList2021, see "Issuer Admin
+  API").
 - **Presentation Exchange `presentationDefinition` support** — genuinely
   rejected with `501 Not Implemented` rather than silently accepted or
   faked (see "What's implemented").
@@ -1496,7 +1621,9 @@ ds-identity-hub-rs/
                             did:web host, STS credentials, scope pattern,
                             trusted-issuer allow-list, known-holder-pid
                             allow-list, operator-supplied extra outbound
-                            hosts.
+                            hosts, Issuer Admin API settings (admin bind/
+                            token, participant context id, holder
+                            approval policy).
         state.rs           AppState: identity, STS-party identity, store,
                             reqwest client (host.docker.internal override,
                             connect/total timeouts), the derived
@@ -1515,7 +1642,13 @@ ds-identity-hub-rs/
                             holderPid check, embedded-credential proof
                             verification, CredentialOfferMessage
                             non-empty/catalog checks.
-        handlers.rs         All HTTP routes for both modes.
+        handlers.rs         All public HTTP routes for both modes,
+                            including issuance delivery and the
+                            StatusList2021 endpoint.
+        issuer.rs           Issuer governance state: credential catalog,
+                            holder registry, issuance-process/issued-
+                            credential records, status list, QuerySpec.
+        admin.rs            Issuer Admin API router (separate listener).
         main.rs             CLI: `identity-hub credential-service|issuer-service`;
                             also runs the one-off Contreforts round-trip
                             proof at startup (Credential Service mode).
@@ -1525,6 +1658,9 @@ ds-identity-hub-rs/
                             security audit, MEDIUM).
       tests/
         dcp_tck.rs               Real dcp-tck-runtime conformance test.
+        issuer_admin_api.rs      Issuer Admin API contract, approval flow,
+                                  StatusList2021 revocation (real HTTP, no
+                                  Docker/TCK needed).
         dcp.tck.properties       TCK config, bind-mounted into the container.
         storage_offer_auth.rs    Storage/Offer API authorization rejection
                                   cases (real HTTP, no Docker/TCK needed).
@@ -1604,6 +1740,10 @@ cargo run -p identity-hub-http --bin identity-hub -- credential-service \
 # Minimal Issuer Service (CIP only), a different port:
 cargo run -p identity-hub-http --bin identity-hub -- issuer-service \
   --bind 0.0.0.0:8081 --did-host localhost:8081
+
+# ...with the Issuer Admin API (127.0.0.1:8182) and manual holder approval:
+IDENTITY_HUB_ADMIN_TOKEN=change-me cargo run -p identity-hub-http --bin identity-hub -- \
+  issuer-service --bind 0.0.0.0:8081 --did-host localhost:8081 --holder-approval manual
 ```
 
 `--did-host` is the `host[:port]` this service is externally reachable at —

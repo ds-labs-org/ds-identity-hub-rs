@@ -271,7 +271,7 @@ async fn issued_credential_delivery_does_not_follow_a_service_endpoint_to_an_unc
             "@context": ["https://w3id.org/dspace-dcp/v1.0/dcp.jsonld"],
             "type": "CredentialRequestMessage",
             "holderPid": "holder-pid-ssrf",
-            "credentials": [{"id": state.supported_credential.id}],
+            "credentials": [{"id": "membership-credential"}],
         }))
         .send()
         .await
