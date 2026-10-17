@@ -39,9 +39,21 @@ struct CommonArgs {
     /// to `localhost:<bind port>`.
     #[arg(long)]
     did_host: Option<String>,
+    /// Client id of the embedded STS and of the OID4VCI operator endpoints.
     #[arg(long, default_value = "tck-client")]
     sts_client_id: String,
-    #[arg(long, default_value = "tck-secret")]
+    /// Client secret paired with `--sts-client-id`. Required, with no
+    /// default: whoever holds it can mint STS tokens that read this
+    /// service's stored credentials and create OID4VCI offers (2026-10-16
+    /// audit, C1: it used to default to the DCP TCK's public `tck-secret`).
+    /// Prefer the environment variable, which keeps it out of the process
+    /// list.
+    #[arg(
+        long,
+        env = "IDENTITY_HUB_STS_CLIENT_SECRET",
+        hide_env_values = true,
+        value_parser = clap::builder::NonEmptyStringValueParser::new()
+    )]
     sts_client_secret: String,
     #[arg(long, default_value = DEFAULT_SCOPE_PATTERN)]
     scope_pattern: String,
@@ -321,7 +333,12 @@ mod cli_scheme_switch_tests {
     ];
 
     fn argv(subcommand: &str, extra: &[&str]) -> Vec<String> {
-        let mut argv = vec!["identity-hub".to_string(), subcommand.to_string()];
+        let mut argv = vec![
+            "identity-hub".to_string(),
+            subcommand.to_string(),
+            "--sts-client-secret".to_string(),
+            "test-secret".to_string(),
+        ];
         argv.extend(extra.iter().map(|arg| (*arg).to_string()));
         argv
     }
@@ -446,7 +463,12 @@ mod cli_admin_flag_tests {
     use super::*;
 
     fn config(extra: &[&str]) -> Config {
-        let mut argv = vec!["identity-hub", "issuer-service"];
+        let mut argv = vec![
+            "identity-hub",
+            "issuer-service",
+            "--sts-client-secret",
+            "test-secret",
+        ];
         argv.extend_from_slice(extra);
         match Cli::try_parse_from(argv).expect("parses").mode {
             CliMode::IssuerService(args) => args.into_config(Mode::IssuerService),
@@ -486,5 +508,47 @@ mod cli_admin_flag_tests {
     #[test]
     fn empty_token_means_no_admin_api() {
         assert_eq!(config(&["--admin-token", ""]).admin_token, None);
+    }
+}
+
+/// 2026-10-16 audit, C1 (CRITICAL): `--sts-client-secret` defaulted to the
+/// DCP TCK's public `tck-secret`, so a hub started without it let anyone
+/// mint STS tokens (reading every stored credential through the
+/// Presentation API) and OID4VCI offers (credentials signed by this
+/// issuer). The secret is now required, from the flag or
+/// `IDENTITY_HUB_STS_CLIENT_SECRET`, and must not be empty.
+#[cfg(test)]
+mod sts_client_secret_tests {
+    use super::*;
+
+    fn parse(args: &[&str]) -> Result<Cli, clap::Error> {
+        Cli::try_parse_from(std::iter::once("identity-hub").chain(args.iter().copied()))
+    }
+
+    #[test]
+    fn a_hub_without_an_sts_client_secret_does_not_start() {
+        for mode in ["credential-service", "issuer-service"] {
+            let err = parse(&[mode]).expect_err("no operator secret, no hub");
+            assert!(
+                err.to_string().contains("--sts-client-secret"),
+                "{mode}: the error names the missing flag: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_empty_sts_client_secret_is_refused() {
+        assert!(parse(&["issuer-service", "--sts-client-secret", ""]).is_err());
+    }
+
+    #[test]
+    fn an_explicit_sts_client_secret_reaches_the_config() {
+        let cli = parse(&["issuer-service", "--sts-client-secret", "s3cret"]).unwrap();
+        let CliMode::IssuerService(args) = cli.mode else {
+            panic!("issuer-service parses as IssuerService");
+        };
+        let config = args.into_config(Mode::IssuerService);
+        assert_eq!(config.sts_client_secret, "s3cret");
+        assert_eq!(config.sts_client_id, "tck-client");
     }
 }

@@ -110,11 +110,13 @@ Ports: 9080 base, 9081 identity API, 9082 credentials/presentation API
 ```
 cargo run --release -p identity-hub-http --bin identity-hub -- \
   credential-service --bind 0.0.0.0:18080 --did-host 127.0.0.1:18080 \
-  --trusted-issuer-did did:web:127.0.0.1%3A18080:sts-party
+  --trusted-issuer-did did:web:127.0.0.1%3A18080:sts-party \
+  --sts-client-secret tck-secret
 ```
 
 Its Presentation API is `POST /presentations/query`; its own embedded STS is
-`POST /sts/token` (default client id/secret `tck-client`/`tck-secret`).
+`POST /sts/token` (client id `tck-client` by default; the secret has no
+default, and `verifier-token` sends `tck-secret` unless told otherwise).
 
 **The `--trusted-issuer-did` flag is required as of the 2026-09-20 security
 hardening** (see `../ARCHITECTURE.md`'s "What's simplified or stubbed",

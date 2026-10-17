@@ -371,11 +371,10 @@ async fn storage_write_accepts_credentials_with_genuinely_verifiable_proofs() {
     let caller = spawn_caller_identity("issuer").await;
     let (state, base) = spawn_credential_service(vec![caller.own_did().to_string()]).await;
     let token = bearer_token(&caller);
-    let genuine = genuine_credential_container(
-        "MembershipCredential",
-        &caller,
-        "did:web:localhost%3A0:holder",
-    );
+    // Bound to this Credential Service itself: a credential for another
+    // holder is refused (2026-10-16 audit, E2; `stored_credential_claims.rs`).
+    let genuine =
+        genuine_credential_container("MembershipCredential", &caller, state.identity.own_did());
     let body = credential_message_body(KNOWN_HOLDER_PID, "ISSUED", vec![genuine]);
     let response = post(&format!("{base}/credentials"), &token, &body)
         .await

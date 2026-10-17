@@ -35,6 +35,14 @@ pub struct StsConfig {
     pub client_secret: String,
 }
 
+/// Byte-wise comparison whose running time does not depend on *where* the
+/// first difference is, so a secret cannot be recovered one byte at a time
+/// from response timing. (The length still shows; a secret's length is not
+/// the secret.) Used for every operator credential and bearer token check.
+pub fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+    a.len() == b.len() && a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
+}
+
 impl StsConfig {
     pub fn new(client_id: impl Into<String>, client_secret: impl Into<String>) -> Self {
         Self {
@@ -132,7 +140,12 @@ pub fn issue_token(
     if req.grant_type != "client_credentials" {
         return Err(StsError::UnsupportedGrantType);
     }
-    if req.client_id != config.client_id || req.client_secret != config.client_secret {
+    let id_ok = constant_time_eq(req.client_id.as_bytes(), config.client_id.as_bytes());
+    let secret_ok = constant_time_eq(
+        req.client_secret.as_bytes(),
+        config.client_secret.as_bytes(),
+    );
+    if !(id_ok && secret_ok) {
         return Err(StsError::InvalidClient);
     }
     if req.audience.trim().is_empty() {

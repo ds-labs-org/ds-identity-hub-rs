@@ -862,6 +862,18 @@ including the first (wrong) fixes tried along the way).
   identically three times — see "DCP TCK conformance snapshot"; like the
   ninth and tenth changes, this fix closed real, TCK-invisible gaps, not
   TCK regressions.
+- **What a stored credential says, checked since the 2026-10-16 project
+  audit (E2).** The Storage API used to check the deliverer and each
+  credential's signature, but not its claims, so a trusted deliverer could
+  store a credential signed by an untrusted DID, already expired, or bound
+  to another holder. `validation::check_credential_claims` now requires
+  each credential's `iss` to be on `--trusted-issuer-did`, its subject
+  (`sub`, else `vc.credentialSubject.id`) to be this service's own DID, and
+  `now` to be inside its `nbf`/`exp` window (60 s skew on `nbf`); the
+  Presentation API leaves out expired credentials and repeats
+  (`handlers::presentable`). Revocation is still the verifier's check: the
+  hub does not fetch issuers' status lists. Tests:
+  `tests/stored_credential_claims.rs`. TCK: 54/54, unchanged, run locally.
 - **Trusted-issuer allow-list check, added 2026-09-20 (sixth change
   today).** `verify_bearer_token` accepting any `iss` whose `did:web`
   document resolves and whose key verifies the token's signature (and is
@@ -1323,8 +1335,13 @@ Simplified or not implemented:
   Storage API answered non-2xx but kept the VC anyway, that VC's index may
   later go to another credential; revoking that one would also make the
   kept copy read as revoked, which fails safe.
-- **OID4VCI-issued credentials carry no `credentialStatus`** and are not
-  recorded.
+- **OID4VCI issuance skips holder approval, by design.** The operator's
+  pre-authorized offer is the approval for that redemption (decided
+  2026-10-17). Since the 2026-10-16 audit (E1) the credential still carries
+  a `credentialStatus`, gets a holder record (per `--holder-approval`), a
+  `DELIVERED` issuance process (`holderPid` `oid4vci`) and an
+  issued-credential record the admin API can revoke, and a rejected holder
+  is refused with `credential_request_denied`.
 - **Stale token on manual approval.** With `--holder-approval manual`,
   delivery forwards the `token` claim the holder sent with its original
   request (DCP step 7). Those tokens are short-lived (typically 5 minutes),
@@ -1729,6 +1746,9 @@ cargo test -p identity-hub-http --test dcp_tck -- --ignored --nocapture   # need
 ## Running it
 
 ```bash
+# Every mode needs the STS/OID4VCI operator secret (no default):
+export IDENTITY_HUB_STS_CLIENT_SECRET=change-me-too
+
 # Credential Service (VPP + CIP), default port 8080. --trusted-issuer-did is
 # required (may be repeated) - an empty allow-list trusts nobody, so the
 # Storage API and Credential Offer API reject every write with 401 until at
@@ -1749,8 +1769,11 @@ IDENTITY_HUB_ADMIN_TOKEN=change-me cargo run -p identity-hub-http --bin identity
 `--did-host` is the `host[:port]` this service is externally reachable at —
 embedded in its own `did:web` identity and advertised service endpoint (see
 `Config`'s doc comment in `crates/identity-hub-http/src/config.rs`).
-`--sts-client-id`/`--sts-client-secret` default to `tck-client`/
-`tck-secret`; `--insecure-http` (plain HTTP `did:web` resolution) defaults
+`--sts-client-id` defaults to `tck-client`; `--sts-client-secret` (or
+`IDENTITY_HUB_STS_CLIENT_SECRET`) is required and has no default
+(2026-10-16 audit, C1: it used to default to the TCK's public `tck-secret`,
+which let anyone mint STS tokens and OID4VCI offers on a hub started
+without it); `--insecure-http` (plain HTTP `did:web` resolution) defaults
 to `true`, matching this bootstrap's local/test-only scope, and can now be
 turned off with `--insecure-http false` (or `--insecure-http=false`) to
 switch every `did:web` resolution this process performs, and the

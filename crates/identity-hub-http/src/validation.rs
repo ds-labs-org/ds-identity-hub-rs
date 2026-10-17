@@ -46,6 +46,75 @@ pub enum ValidationError {
     UnknownCredentialId(String),
     #[error("could not resolve the offering issuer's own credential catalog: {0}")]
     CatalogUnavailable(String),
+    #[error("credential issuer '{0}' is not a trusted issuer")]
+    UntrustedCredentialIssuer(String),
+    #[error("credential is bound to '{0}', not to this service")]
+    ForeignSubject(String),
+    #[error("credential is outside its validity period")]
+    OutsideValidity,
+}
+
+/// How far a credential's `nbf` may be ahead of this clock.
+const CLOCK_SKEW_SECS: u64 = 60;
+
+/// What a JWT-format credential delivered to the Storage API says about
+/// itself, checked after [`verify_credential_proofs`] has verified its
+/// signature (2026-10-16 project audit, E2): its issuer (`iss`) must be a
+/// trusted issuer, it must be bound to this Credential Service's own DID
+/// (`sub`, or `vc.credentialSubject.id` when there is no `sub`), and `now`
+/// must be inside its validity window (`nbf`, `exp`, when present). Before
+/// this, a trusted deliverer could store a credential signed by anybody,
+/// already expired, or belonging to another holder, and the Presentation
+/// API would hand it out as this holder's.
+pub fn check_credential_claims(
+    credentials: &[CredentialContainer],
+    own_did: &str,
+    trusted_issuer_dids: &[String],
+    now: u64,
+) -> Result<(), ValidationError> {
+    for container in credentials {
+        let jws = container.payload.as_str().ok_or_else(|| {
+            ValidationError::UnverifiableProof(
+                "a jwt-format credential's payload must be a JWS string".to_string(),
+            )
+        })?;
+        let (_, _, payload) =
+            dcp_core::decode_jws_unverified(jws).map_err(ValidationError::UnverifiableProof)?;
+        let issuer = payload.get("iss").and_then(Value::as_str).unwrap_or("");
+        if !trusted_issuer_dids.iter().any(|trusted| trusted == issuer) {
+            return Err(ValidationError::UntrustedCredentialIssuer(
+                issuer.to_string(),
+            ));
+        }
+        let subject = payload.get("sub").and_then(Value::as_str).or_else(|| {
+            payload
+                .pointer("/vc/credentialSubject/id")
+                .and_then(Value::as_str)
+        });
+        if subject != Some(own_did) {
+            return Err(ValidationError::ForeignSubject(
+                subject.unwrap_or("nobody").to_string(),
+            ));
+        }
+        if !is_within_validity(&payload, now) {
+            return Err(ValidationError::OutsideValidity);
+        }
+    }
+    Ok(())
+}
+
+/// Whether `now` is inside a JWT's `nbf`..`exp` window (each bound only when
+/// present), allowing [`CLOCK_SKEW_SECS`] on `nbf`.
+pub fn is_within_validity(payload: &Value, now: u64) -> bool {
+    let nbf_ok = payload
+        .get("nbf")
+        .and_then(Value::as_u64)
+        .is_none_or(|nbf| nbf <= now + CLOCK_SKEW_SECS);
+    let exp_ok = payload
+        .get("exp")
+        .and_then(Value::as_u64)
+        .is_none_or(|exp| now < exp);
+    nbf_ok && exp_ok
 }
 
 /// `CredentialMessage.status` must be one of [`VALID_CREDENTIAL_MESSAGE_STATUSES`] -
