@@ -862,6 +862,18 @@ including the first (wrong) fixes tried along the way).
   identically three times — see "DCP TCK conformance snapshot"; like the
   ninth and tenth changes, this fix closed real, TCK-invisible gaps, not
   TCK regressions.
+- **What a stored credential says, checked since the 2026-10-16 project
+  audit (E2).** The Storage API used to check the deliverer and each
+  credential's signature, but not its claims, so a trusted deliverer could
+  store a credential signed by an untrusted DID, already expired, or bound
+  to another holder. `validation::check_credential_claims` now requires
+  each credential's `iss` to be on `--trusted-issuer-did`, its subject
+  (`sub`, else `vc.credentialSubject.id`) to be this service's own DID, and
+  `now` to be inside its `nbf`/`exp` window (60 s skew on `nbf`); the
+  Presentation API leaves out expired credentials and repeats
+  (`handlers::presentable`). Revocation is still the verifier's check: the
+  hub does not fetch issuers' status lists. Tests:
+  `tests/stored_credential_claims.rs`. TCK: 54/54, unchanged, run locally.
 - **Trusted-issuer allow-list check, added 2026-09-20 (sixth change
   today).** `verify_bearer_token` accepting any `iss` whose `did:web`
   document resolves and whose key verifies the token's signature (and is

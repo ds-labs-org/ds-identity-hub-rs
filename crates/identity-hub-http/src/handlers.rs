@@ -30,8 +30,8 @@ use crate::issuer::{
 };
 use crate::state::AppState;
 use crate::validation::{
-    ValidationError, check_known_holder_pid, validate_offer_credentials, validate_status,
-    verify_credential_proofs,
+    ValidationError, check_credential_claims, check_known_holder_pid, is_within_validity,
+    validate_offer_credentials, validate_status, verify_credential_proofs,
 };
 
 pub fn router(state: Arc<AppState>) -> Router {
@@ -233,7 +233,7 @@ async fn presentation_query(
         .into_iter()
         .filter(|t| allowed_types.contains(t))
         .collect();
-    let matched = state.store.credentials_of_types(&effective_types);
+    let matched = presentable(state.store.credentials_of_types(&effective_types));
     let vp_jws = build_presentation(&state, caller_did, &matched);
 
     Json(PresentationResponseMessage::new(vec![vp_jws])).into_response()
@@ -296,6 +296,24 @@ async fn granted_credential_types(
     Ok(state.scope_matcher.credential_types(&granted_scopes))
 }
 
+/// Leaves out of a presentation what a verifier must refuse anyway
+/// (2026-10-16 project audit, E2): a JWT credential outside its validity
+/// window, and a credential already included (stored twice).
+fn presentable(credentials: Vec<CredentialContainer>) -> Vec<CredentialContainer> {
+    let now = now_secs();
+    let mut seen = std::collections::HashSet::new();
+    credentials
+        .into_iter()
+        .filter(|c| seen.insert(c.payload.to_string()))
+        .filter(|c| {
+            c.payload
+                .as_str()
+                .and_then(|jws| dcp_core::decode_jws_unverified(jws).ok())
+                .is_none_or(|(_, _, payload)| is_within_validity(&payload, now))
+        })
+        .collect()
+}
+
 fn build_presentation(
     state: &AppState,
     audience: &str,
@@ -353,9 +371,12 @@ fn build_presentation(
 /// Once the token envelope and issuer are both trusted, the message *body*
 /// itself is validated too (`crate::validation`, added 2026-09-20): `status`
 /// must be a recognized value, `holderPid` must be one this service was
-/// configured to expect (`Config::known_holder_pids`), and every JWT-format
-/// embedded credential's own proof must genuinely verify - see
-/// `crate::validation`'s module doc comment for exactly what each closes.
+/// configured to expect (`Config::known_holder_pids`), every JWT-format
+/// embedded credential's own proof must genuinely verify, and (2026-10-16
+/// audit, E2) each credential must come from a trusted issuer, be bound to
+/// this service's own DID and be inside its validity window
+/// (`validation::check_credential_claims`) - see `crate::validation`'s
+/// module doc comment for exactly what each closes.
 async fn storage_write(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -391,6 +412,14 @@ async fn storage_write(
     )
     .await
     {
+        return validation_error_response(err);
+    }
+    if let Err(err) = check_credential_claims(
+        &message.credentials,
+        state.identity.own_did(),
+        &state.config.trusted_issuer_dids,
+        now_secs(),
+    ) {
         return validation_error_response(err);
     }
     state.store.store(StoredCredentialBatch {
