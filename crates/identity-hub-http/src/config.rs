@@ -40,6 +40,18 @@ pub enum HolderApproval {
     Manual,
 }
 
+/// Where to find the dataspace's trusted issuers registry
+/// (`--trusted-issuers-registry`).
+#[derive(Debug, Clone)]
+pub struct TrustedIssuersRegistry {
+    /// Base URL of the registry's public API (`https://registry.example`);
+    /// the snapshot is `{base_url}/v1/snapshot`.
+    pub base_url: String,
+    /// The registry's own `did:web`, whose DID document holds the key that
+    /// signs the snapshot.
+    pub did: String,
+}
+
 #[derive(Debug, Clone)]
 pub struct Config {
     pub mode: Mode,
@@ -98,6 +110,13 @@ pub struct Config {
     /// and `tests/dcp_tck.rs`, which passes the identical value here via
     /// [`Config::with_trusted_issuer_dids`].
     pub trusted_issuer_dids: Vec<String>,
+    /// The dataspace's trusted issuers registry
+    /// (`ds-trusted-issuers-registry-rs`). When set, it replaces
+    /// [`trusted_issuer_dids`](Self::trusted_issuer_dids) as the
+    /// "Verify Trust" step: an issuer is trusted for the credential types
+    /// its accreditation chain in the registry's signed snapshot covers,
+    /// and only for those - see `crate::registry_trust`.
+    pub trusted_issuers_registry: Option<TrustedIssuersRegistry>,
     /// Allow-list of `holderPid` correlation ids this Credential Service was
     /// configured to expect on the Storage API (`POST /credentials`) - the
     /// DCP spec's own correlation mechanism between a Credential Request and
@@ -187,6 +206,7 @@ impl Config {
             scope_pattern: DEFAULT_SCOPE_PATTERN.to_string(),
             insecure_http: true,
             trusted_issuer_dids: Vec::new(),
+            trusted_issuers_registry: None,
             known_holder_pids: Vec::new(),
             allowed_outbound_hosts: Vec::new(),
             oid4vci_client_id: None,
@@ -200,6 +220,20 @@ impl Config {
             participant_context_id: DEFAULT_PARTICIPANT_CONTEXT_ID.to_string(),
             holder_approval: HolderApproval::Auto,
         }
+    }
+
+    /// Builder-style setter for
+    /// [`trusted_issuers_registry`](Self::trusted_issuers_registry).
+    pub fn with_trusted_issuers_registry(
+        mut self,
+        base_url: impl Into<String>,
+        did: impl Into<String>,
+    ) -> Self {
+        self.trusted_issuers_registry = Some(TrustedIssuersRegistry {
+            base_url: base_url.into(),
+            did: did.into(),
+        });
+        self
     }
 
     /// Builder-style setter for [`trusted_issuer_dids`](Self::trusted_issuer_dids),

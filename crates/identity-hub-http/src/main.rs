@@ -138,6 +138,7 @@ impl CommonArgs {
             scope_pattern: self.scope_pattern,
             insecure_http: self.insecure_http,
             trusted_issuer_dids: self.trusted_issuer_dids,
+            trusted_issuers_registry: None,
             known_holder_pids: self.known_holder_pids,
             allowed_outbound_hosts: self.allow_resolve_host,
             oid4vci_client_id: self.oid4vci_client_id,

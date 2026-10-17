@@ -17,6 +17,7 @@ identity-hub-graph = { path = "../identity-hub-graph" }
 identity-hub-contreforts = { path = "../identity-hub-contreforts" }
 contreforts-core = { path = "../../vendor/contreforts-core" }
 ds-dcp-core-rs = { workspace = true }
+trusted-issuers-core = { workspace = true }
 axum = { workspace = true }
 tokio = { workspace = true }
 tower = { workspace = true }
