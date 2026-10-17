@@ -104,7 +104,14 @@ async fn spawn_default_config_binary() -> (ChildGuard, String, String) {
     drop(probe);
 
     let child = Command::new(env!("CARGO_BIN_EXE_identity-hub"))
-        .args(["credential-service", "--bind", &format!("127.0.0.1:{port}")])
+        .args([
+            "credential-service",
+            "--bind",
+            &format!("127.0.0.1:{port}"),
+            // The one flag with no default (2026-10-16 audit, C1).
+            "--sts-client-secret",
+            "test-secret",
+        ])
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .spawn()

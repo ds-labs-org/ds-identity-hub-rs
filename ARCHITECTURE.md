@@ -1729,6 +1729,9 @@ cargo test -p identity-hub-http --test dcp_tck -- --ignored --nocapture   # need
 ## Running it
 
 ```bash
+# Every mode needs the STS/OID4VCI operator secret (no default):
+export IDENTITY_HUB_STS_CLIENT_SECRET=change-me-too
+
 # Credential Service (VPP + CIP), default port 8080. --trusted-issuer-did is
 # required (may be repeated) - an empty allow-list trusts nobody, so the
 # Storage API and Credential Offer API reject every write with 401 until at
@@ -1749,8 +1752,11 @@ IDENTITY_HUB_ADMIN_TOKEN=change-me cargo run -p identity-hub-http --bin identity
 `--did-host` is the `host[:port]` this service is externally reachable at —
 embedded in its own `did:web` identity and advertised service endpoint (see
 `Config`'s doc comment in `crates/identity-hub-http/src/config.rs`).
-`--sts-client-id`/`--sts-client-secret` default to `tck-client`/
-`tck-secret`; `--insecure-http` (plain HTTP `did:web` resolution) defaults
+`--sts-client-id` defaults to `tck-client`; `--sts-client-secret` (or
+`IDENTITY_HUB_STS_CLIENT_SECRET`) is required and has no default
+(2026-10-16 audit, C1: it used to default to the TCK's public `tck-secret`,
+which let anyone mint STS tokens and OID4VCI offers on a hub started
+without it); `--insecure-http` (plain HTTP `did:web` resolution) defaults
 to `true`, matching this bootstrap's local/test-only scope, and can now be
 turned off with `--insecure-http false` (or `--insecure-http=false`) to
 switch every `did:web` resolution this process performs, and the

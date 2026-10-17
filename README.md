@@ -219,6 +219,9 @@ cargo test -p identity-hub-http --test dcp_tck -- --ignored --nocapture   # need
 # repeated) - an empty allow-list trusts nobody, so the Storage API and
 # Credential Offer API reject every write with 401 until at least one is
 # given (2026-09-20 fix, HIGH; see Config::trusted_issuer_dids's doc comment):
+# Every mode needs the operator secret of the embedded STS and the OID4VCI
+# operator endpoints: there is no default (--sts-client-secret, or):
+export IDENTITY_HUB_STS_CLIENT_SECRET=change-me-too
 cargo run -p identity-hub-http --bin identity-hub -- credential-service --did-host localhost:8080 --trusted-issuer-did did:web:some-issuer.example:issuer
 
 # Minimal Issuer Service (CIP only):
@@ -244,7 +247,7 @@ Issuer Admin API flags (issuer-service only):
 OID4VCI round trip between the two. Start the Credential Service with
 `--trusted-issuer-did did:web:localhost%3A8081:issuer-service` so it accepts
 what that Issuer Service signs; `<id>:<secret>` is `--sts-client-id`/
-`--sts-client-secret` (set real values outside local testing):
+`--sts-client-secret` (the secret is required; the id defaults to `tck-client`):
 
 ```bash
 # 1. Issuer operator mints an offer (add "tx_code": true for a PIN).

@@ -64,6 +64,7 @@ use identity_hub_core::oid4vci::{
     build_jwt_proof_for_client, inspect_jwt_proof, well_known_url,
 };
 use identity_hub_core::store::StoredCredentialBatch;
+use identity_hub_core::sts::constant_time_eq;
 
 use crate::auth::check_trusted_issuer;
 use crate::config::{Config, Mode};
@@ -267,7 +268,10 @@ fn operator_rejection(state: &AppState, headers: &HeaderMap) -> Option<Response>
         .as_deref()
         .and_then(|s| s.split_once(':'))
         .is_some_and(|(id, secret)| {
-            id == state.config.sts_client_id && secret == state.config.sts_client_secret
+            let id_ok = constant_time_eq(id.as_bytes(), state.config.sts_client_id.as_bytes());
+            let secret_ok =
+                constant_time_eq(secret.as_bytes(), state.config.sts_client_secret.as_bytes());
+            id_ok && secret_ok
         });
     if authorized {
         None

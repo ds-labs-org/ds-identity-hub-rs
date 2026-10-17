@@ -39,9 +39,21 @@ struct CommonArgs {
     /// to `localhost:<bind port>`.
     #[arg(long)]
     did_host: Option<String>,
+    /// Client id of the embedded STS and of the OID4VCI operator endpoints.
     #[arg(long, default_value = "tck-client")]
     sts_client_id: String,
-    #[arg(long, default_value = "tck-secret")]
+    /// Client secret paired with `--sts-client-id`. Required, with no
+    /// default: whoever holds it can mint STS tokens that read this
+    /// service's stored credentials and create OID4VCI offers (2026-10-16
+    /// audit, C1: it used to default to the DCP TCK's public `tck-secret`).
+    /// Prefer the environment variable, which keeps it out of the process
+    /// list.
+    #[arg(
+        long,
+        env = "IDENTITY_HUB_STS_CLIENT_SECRET",
+        hide_env_values = true,
+        value_parser = clap::builder::NonEmptyStringValueParser::new()
+    )]
     sts_client_secret: String,
     #[arg(long, default_value = DEFAULT_SCOPE_PATTERN)]
     scope_pattern: String,
@@ -321,7 +333,12 @@ mod cli_scheme_switch_tests {
     ];
 
     fn argv(subcommand: &str, extra: &[&str]) -> Vec<String> {
-        let mut argv = vec!["identity-hub".to_string(), subcommand.to_string()];
+        let mut argv = vec![
+            "identity-hub".to_string(),
+            subcommand.to_string(),
+            "--sts-client-secret".to_string(),
+            "test-secret".to_string(),
+        ];
         argv.extend(extra.iter().map(|arg| (*arg).to_string()));
         argv
     }
@@ -446,7 +463,12 @@ mod cli_admin_flag_tests {
     use super::*;
 
     fn config(extra: &[&str]) -> Config {
-        let mut argv = vec!["identity-hub", "issuer-service"];
+        let mut argv = vec![
+            "identity-hub",
+            "issuer-service",
+            "--sts-client-secret",
+            "test-secret",
+        ];
         argv.extend_from_slice(extra);
         match Cli::try_parse_from(argv).expect("parses").mode {
             CliMode::IssuerService(args) => args.into_config(Mode::IssuerService),
