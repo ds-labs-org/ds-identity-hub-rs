@@ -10,6 +10,8 @@ use identity_hub_core::sts::StsConfig;
 use crate::config::{Config, Mode};
 use crate::issuer::{DefinitionCatalog, HolderRegistry, IssuanceProcess, IssuedCredentials};
 use crate::outbound::OutboundPolicy;
+#[cfg(feature = "trusted-issuers-registry")]
+use crate::registry_trust::RegistryTrust;
 
 /// The one host every `host.docker.internal` reference in this process
 /// shares - both the static `reqwest` DNS override below and the
@@ -248,6 +250,12 @@ pub struct AppState {
     /// module doc comment and this constructor's own comment on how it's
     /// derived.
     pub outbound: OutboundPolicy,
+    /// The trusted issuers registry this service trusts issuers through,
+    /// when `Config::trusted_issuers_registry` is set (see
+    /// `crate::registry_trust`); `None` keeps the static
+    /// `--trusted-issuer-did` list.
+    #[cfg(feature = "trusted-issuers-registry")]
+    pub registry_trust: Option<RegistryTrust>,
     /// `jti` values already accepted by `crate::auth::verify_bearer_token`,
     /// across every endpoint that calls it - process-lifetime only, per
     /// `../../ARCHITECTURE.md`'s "No durable storage": sufficient to satisfy
@@ -332,7 +340,26 @@ impl AppState {
         ]
         .into_iter()
         .chain(config.allowed_outbound_hosts.iter().cloned());
+        // The trusted issuers registry: its API (the snapshot) and the host
+        // its did:web resolves to (the snapshot key).
+        #[cfg(feature = "trusted-issuers-registry")]
+        let outbound_hosts =
+            outbound_hosts.chain(config.trusted_issuers_registry.iter().flat_map(|registry| {
+                [
+                    url_host(&registry.base_url),
+                    dcp_core::did_web_to_url(&registry.did, config.insecure_http)
+                        .ok()
+                        .and_then(|url| url_host(&url)),
+                ]
+                .into_iter()
+                .flatten()
+            }));
         let outbound = OutboundPolicy::new(outbound_hosts);
+        #[cfg(feature = "trusted-issuers-registry")]
+        let registry_trust = config
+            .trusted_issuers_registry
+            .clone()
+            .map(RegistryTrust::new);
 
         Self {
             config,
@@ -348,6 +375,8 @@ impl AppState {
             issued: Mutex::new(IssuedCredentials::default()),
             http,
             outbound,
+            #[cfg(feature = "trusted-issuers-registry")]
+            registry_trust,
             seen_jti: Mutex::new(SeenJtiCache::new(MAX_SEEN_JTI)),
             oid4vci: crate::oid4vci::IssuerState::default(),
         }
@@ -360,4 +389,12 @@ impl AppState {
     pub fn base_url(&self) -> String {
         self.config.base_url()
     }
+}
+
+/// The host of `url` (no port), for the outbound allow-list.
+#[cfg(feature = "trusted-issuers-registry")]
+fn url_host(url: &str) -> Option<String> {
+    reqwest::Url::parse(url)
+        .ok()
+        .and_then(|u| u.host_str().map(str::to_string))
 }

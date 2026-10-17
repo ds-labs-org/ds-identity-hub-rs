@@ -65,9 +65,9 @@ use identity_hub_core::oid4vci::{
 };
 use identity_hub_core::store::StoredCredentialBatch;
 
-use crate::auth::check_trusted_issuer;
 use crate::config::{Config, Mode};
 use crate::handlers::mint_credential;
+use crate::registry_trust::check_issuer;
 use crate::state::AppState;
 use crate::validation::verify_credential_proofs;
 
@@ -1305,7 +1305,9 @@ impl ResourceClient<'_> {
 
 /// Applies the same acceptance rules the DCP Storage API applies to a
 /// delivered credential: genuine signature against its own `iss` DID, that
-/// DID on the trusted-issuer allow-list, and - specific to a wallet
+/// DID trusted (by the trusted issuers registry for the credential's type
+/// when one is configured, else on the trusted-issuer allow-list), and -
+/// specific to a wallet
 /// pulling for itself - bound to this Credential Service's own DID.
 /// Returns the credential type to file it under.
 async fn accept_issued_credential(
@@ -1318,7 +1320,22 @@ async fn accept_issued_credential(
         .ok_or_else(|| WalletError::Rejected("credential is not a JWT string".to_string()))?;
     let (_, _, payload) =
         dcp_core::decode_jws_unverified(jws).map_err(|e| WalletError::Rejected(e.to_string()))?;
-    check_trusted_issuer(&payload, &state.config.trusted_issuer_dids)
+    // The type it will be filed under, which the registry (when configured)
+    // must trust its issuer for.
+    let credential_type = payload
+        .pointer("/vc/type")
+        .and_then(Value::as_array)
+        .and_then(|types| {
+            types
+                .iter()
+                .filter_map(Value::as_str)
+                .rfind(|t| *t != "VerifiableCredential")
+        })
+        .map(str::to_string)
+        .ok_or_else(|| WalletError::Rejected("credential has no specific vc.type".to_string()))?;
+    let iss = payload.get("iss").and_then(Value::as_str).unwrap_or("");
+    check_issuer(state, iss, std::slice::from_ref(&credential_type))
+        .await
         .map_err(|e| WalletError::Rejected(e.to_string()))?;
     let probe = CredentialContainer {
         credential_type: String::new(),
@@ -1348,17 +1365,7 @@ async fn accept_issued_credential(
     {
         return Err(WalletError::Rejected("credential has expired".to_string()));
     }
-    payload
-        .pointer("/vc/type")
-        .and_then(Value::as_array)
-        .and_then(|types| {
-            types
-                .iter()
-                .filter_map(Value::as_str)
-                .rfind(|t| *t != "VerifiableCredential")
-        })
-        .map(str::to_string)
-        .ok_or_else(|| WalletError::Rejected("credential has no specific vc.type".to_string()))
+    Ok(credential_type)
 }
 
 #[cfg(test)]

@@ -59,6 +59,16 @@ pub enum AuthError {
     #[error("issuer '{0}' is not on this service's trusted-issuer allow-list")]
     UntrustedIssuer(String),
     #[error(
+        "issuer '{issuer}' is not trusted for credential type '{credential_type}' by the trusted issuers registry: {reason}"
+    )]
+    NotTrustedForType {
+        issuer: String,
+        credential_type: String,
+        reason: String,
+    },
+    #[error("the trusted issuers registry's snapshot is unavailable, so no issuer is trusted: {0}")]
+    TrustRegistryUnavailable(String),
+    #[error(
         "no trusted issuer is configured for this service - the Storage/Credential Offer API rejects every caller until at least one --trusted-issuer-did is given"
     )]
     NoTrustedIssuerConfigured,

@@ -39,6 +39,18 @@ jobs:
       - name: Run tests
         run: cargo test --workspace
 
+      # The trusted issuers registry integration is behind an off-by-default
+      # Cargo feature: check that a default build does not depend on it, and
+      # lint and test the build that has it.
+      - name: Default build has no registry dependency
+        run: "! cargo tree -e normal -p identity-hub-http | grep -q trusted-issuers-core"
+
+      - name: Run clippy (trusted-issuers-registry feature)
+        run: cargo clippy -p identity-hub-http --all-targets --features trusted-issuers-registry -- -D warnings
+
+      - name: Run tests (trusted-issuers-registry feature)
+        run: cargo test -p identity-hub-http --features trusted-issuers-registry
+
   dcp-tck:
     name: DCP TCK conformance (Credential Service scope)
     runs-on: ubuntu-latest
