@@ -898,9 +898,9 @@ pub(crate) fn status_list_url(state: &AppState) -> String {
 /// protocol it asked through.
 ///
 /// With `status_index`, the VC carries a `StatusList2021Entry` pointing at
-/// that bit of [`status_list_url`]. DCP deliveries always pass one (they
-/// get an issued-credential record the admin API can revoke); OID4VCI
-/// issuance passes `None`, since nothing records it for revocation.
+/// that bit of [`status_list_url`]. Both protocols pass one, and record an
+/// issued-credential entry the admin API can revoke (OID4VCI since the
+/// 2026-10-16 audit, E1: see `oid4vci::record_and_mint`).
 pub(crate) fn mint_credential(
     state: &AppState,
     definition: &CredentialDefinition,

@@ -8,8 +8,10 @@
 //!   Authorization Server), `POST /oid4vci/token`, `POST /oid4vci/nonce`,
 //!   `POST /oid4vci/credential`, plus `GET /oid4vci/offers/{id}` serving
 //!   Credential Offers by reference. Issues the exact same JWT VC the DCP
-//!   Credential Request API delivers (`handlers::mint_credential`), minus the
-//!   revocation `credentialStatus` (OID4VCI issuance is not recorded).
+//!   Credential Request API delivers (`handlers::mint_credential`), status
+//!   list entry included, and records it like a DCP issuance (holder,
+//!   issuance process, issued credential) so the Issuer Admin API lists and
+//!   revokes it; a rejected holder is refused (see [`record_and_mint`]).
 //! - **Credential Service = Wallet**: `POST /oid4vci/wallet/offers` redeems a
 //!   Credential Offer from any OID4VCI issuer (this hub's own Issuer Service
 //!   or a third party) and stores the result in the same credential store
@@ -67,8 +69,11 @@ use identity_hub_core::store::StoredCredentialBatch;
 use identity_hub_core::sts::constant_time_eq;
 
 use crate::auth::check_trusted_issuer;
-use crate::config::{Config, Mode};
+use crate::config::{Config, HolderApproval, Mode};
 use crate::handlers::mint_credential;
+use crate::issuer::{
+    self, CredentialRecordStatus, Holder, HolderStatus, IssuanceProcess, ProcessState,
+};
 use crate::state::AppState;
 use crate::validation::verify_credential_proofs;
 
@@ -699,7 +704,12 @@ async fn credential(
             format!("'{config_id}' is not offered by this issuer"),
         );
     };
-    let vc = mint_credential(&state, &definition, key.holder_did(), None).jws;
+    let vc = match record_and_mint(&state, &definition, key.holder_did()) {
+        Ok(vc) => vc,
+        Err((status, description)) => {
+            return oauth_error(status, "credential_request_denied", description);
+        }
+    };
     tracing::info!(
         holder = key.holder_did(),
         config_id,
@@ -715,6 +725,125 @@ async fn credential(
         })
         .into_response(),
     )
+}
+
+/// `holderPid` of the issuance process an OID4VCI redemption records: the
+/// protocol has no holder-side process id, so this names the protocol.
+pub const OID4VCI_HOLDER_PID: &str = "oid4vci";
+
+/// Governs and records one OID4VCI issuance the way a DCP one is
+/// (2026-10-16 audit, E1), then signs it. The operator's pre-authorized
+/// offer stands in for holder approval (decided 2026-10-17), so a pending
+/// holder is served; but a rejected holder is refused, an unknown DID gets
+/// a holder record per `--holder-approval` (an offer authorizes this
+/// redemption, not the DID's future DCP requests), and the credential gets
+/// a `DELIVERED` issuance process, an issued-credential record and a
+/// status-list entry, so the admin API lists it and can revoke it. A
+/// refusal is the HTTP status and description of a
+/// `credential_request_denied` error.
+fn record_and_mint(
+    state: &AppState,
+    definition: &issuer::CredentialDefinition,
+    holder_did: &str,
+) -> Result<String, (StatusCode, &'static str)> {
+    let now = now_secs();
+    let holder_id = {
+        let mut holders = state.holders.lock().expect("holders lock poisoned");
+        match holders.by_did(holder_did) {
+            Some(holder) if holder.status == HolderStatus::Rejected => {
+                return Err((
+                    StatusCode::BAD_REQUEST,
+                    "holder has been rejected by this issuer",
+                ));
+            }
+            Some(holder) => holder.holder_id.clone(),
+            None => {
+                let status = match state.config.holder_approval {
+                    HolderApproval::Auto => HolderStatus::Approved,
+                    HolderApproval::Manual => HolderStatus::Pending,
+                };
+                let holder = Holder {
+                    holder_id: Uuid::new_v4().to_string(),
+                    did: holder_did.to_string(),
+                    name: None,
+                    properties: Default::default(),
+                    status,
+                    created_at: now,
+                };
+                match holders.insert(holder) {
+                    Ok(holder) => holder.holder_id,
+                    Err(err) => {
+                        tracing::warn!(?err, "refusing OID4VCI issuance: holder registry full");
+                        return Err((StatusCode::SERVICE_UNAVAILABLE, "holder registry is full"));
+                    }
+                }
+            }
+        }
+    };
+    let Some(index) = state
+        .issued
+        .lock()
+        .expect("issued lock poisoned")
+        .status_list
+        .allocate()
+    else {
+        return Err((
+            StatusCode::SERVICE_UNAVAILABLE,
+            "the revocation status list is exhausted",
+        ));
+    };
+    let process_id = Uuid::new_v4().to_string();
+    let inserted = state
+        .requests
+        .lock()
+        .expect("requests lock poisoned")
+        .insert(
+            process_id.clone(),
+            IssuanceProcess {
+                id: process_id.clone(),
+                state: ProcessState::Delivered,
+                holder_id: holder_id.clone(),
+                holder_did: holder_did.to_string(),
+                holder_pid: OID4VCI_HOLDER_PID.to_string(),
+                credential_definitions: vec![definition.id.clone()],
+                error_detail: None,
+                created_at: now,
+                state_timestamp: now,
+                delivery_bearer: None,
+                delivery_started: true,
+            },
+        );
+    if inserted.is_err() {
+        state
+            .issued
+            .lock()
+            .expect("issued lock poisoned")
+            .status_list
+            .release(index);
+        return Err((
+            StatusCode::SERVICE_UNAVAILABLE,
+            "too many credential requests in flight",
+        ));
+    }
+    let minted = mint_credential(state, definition, holder_did, Some(index));
+    state
+        .issued
+        .lock()
+        .expect("issued lock poisoned")
+        .insert(issuer::IssuedCredential {
+            id: minted.id,
+            credential_type: definition.credential_type.clone(),
+            credential_definition_id: definition.id.clone(),
+            holder_id,
+            holder_did: holder_did.to_string(),
+            issuance_process_id: process_id,
+            format: definition.format.clone(),
+            issued_at: minted.issued_at,
+            expires_at: minted.expires_at,
+            status: CredentialRecordStatus::Active,
+            status_list_index: index,
+        });
+    Ok(minted.jws)
 }
 
 async fn verify_proof_signature(

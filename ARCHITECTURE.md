@@ -1323,8 +1323,13 @@ Simplified or not implemented:
   Storage API answered non-2xx but kept the VC anyway, that VC's index may
   later go to another credential; revoking that one would also make the
   kept copy read as revoked, which fails safe.
-- **OID4VCI-issued credentials carry no `credentialStatus`** and are not
-  recorded.
+- **OID4VCI issuance skips holder approval, by design.** The operator's
+  pre-authorized offer is the approval for that redemption (decided
+  2026-10-17). Since the 2026-10-16 audit (E1) the credential still carries
+  a `credentialStatus`, gets a holder record (per `--holder-approval`), a
+  `DELIVERED` issuance process (`holderPid` `oid4vci`) and an
+  issued-credential record the admin API can revoke, and a rejected holder
+  is refused with `credential_request_denied`.
 - **Stale token on manual approval.** With `--holder-approval manual`,
   delivery forwards the `token` claim the holder sent with its original
   request (DCP step 7). Those tokens are short-lived (typically 5 minutes),
