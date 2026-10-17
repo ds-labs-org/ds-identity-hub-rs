@@ -33,7 +33,7 @@ ds-dcp-core-rs = { git = "https://github.com/ds-labs-org/ds-dcp-core-rs", rev = 
 # signed snapshot and answers "may this issuer issue this credential type"
 # locally. Pinned by rev like ds-dcp-core-rs (whose rev it shares); this rev
 # is on the registry's ccr-180333f6-p88qlb branch until it merges.
-trusted-issuers-core = { git = "https://github.com/ds-labs-org/ds-trusted-issuers-registry-rs", rev = "96fd687333a456c9a693af4e26b7c24efcecc065" }
+trusted-issuers-core = { git = "https://github.com/ds-labs-org/ds-trusted-issuers-registry-rs", rev = "39f742412e6965feec936f568c216ef08e1c8792" }
 
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
