@@ -64,6 +64,19 @@ struct CommonArgs {
     /// comment).
     #[arg(long = "trusted-issuer-did")]
     trusted_issuer_dids: Vec<String>,
+    /// Base URL of the dataspace's trusted issuers registry
+    /// (`ds-trusted-issuers-registry-rs`), e.g. `https://registry.example`.
+    /// When given, it replaces `--trusted-issuer-did`: an issuer is trusted
+    /// for exactly the credential types the registry's signed snapshot
+    /// accredits it for, checked for the caller and for each delivered
+    /// credential's own issuer. Its host is added to the outbound allow-list.
+    #[arg(long)]
+    trusted_issuers_registry: Option<String>,
+    /// The registry's own `did:web`, holding the key that signs its
+    /// snapshot. Defaults to the `did:web` of `--trusted-issuers-registry`'s
+    /// host and port.
+    #[arg(long, requires = "trusted_issuers_registry")]
+    trusted_issuers_registry_did: Option<String>,
     /// A `holderPid` this Credential Service should accept on the Storage
     /// API (may be repeated). Empty (the default) means no restriction is
     /// configured - see `Config::known_holder_pids`'s doc comment for why
@@ -138,7 +151,12 @@ impl CommonArgs {
             scope_pattern: self.scope_pattern,
             insecure_http: self.insecure_http,
             trusted_issuer_dids: self.trusted_issuer_dids,
-            trusted_issuers_registry: None,
+            trusted_issuers_registry: self.trusted_issuers_registry.map(|base_url| {
+                let did = self
+                    .trusted_issuers_registry_did
+                    .unwrap_or_else(|| registry_did_from_url(&base_url));
+                identity_hub_http::config::TrustedIssuersRegistry { base_url, did }
+            }),
             known_holder_pids: self.known_holder_pids,
             allowed_outbound_hosts: self.allow_resolve_host,
             oid4vci_client_id: self.oid4vci_client_id,
@@ -183,11 +201,17 @@ async fn main() {
     // after standing the process up), but an operator who forgot the flag
     // entirely should find out from the logs, not from every write silently
     // getting 401.
-    if config.mode == Mode::CredentialService && config.trusted_issuer_dids.is_empty() {
+    if let Some(registry) = &config.trusted_issuers_registry {
+        tracing::info!(
+            registry = %registry.base_url,
+            registry_did = %registry.did,
+            "issuers are trusted through the trusted issuers registry's signed snapshot"
+        );
+    } else if config.mode == Mode::CredentialService && config.trusted_issuer_dids.is_empty() {
         tracing::warn!(
-            "no --trusted-issuer-did configured: the Storage API (POST /credentials) and \
-             Credential Offer API (POST /offers) will reject every write with 401 until at \
-             least one is given"
+            "no --trusted-issuer-did or --trusted-issuers-registry configured: the Storage API \
+             (POST /credentials) and Credential Offer API (POST /offers) will reject every write \
+             with 401 until one is given"
         );
     }
 
@@ -487,5 +511,35 @@ mod cli_admin_flag_tests {
     #[test]
     fn empty_token_means_no_admin_api() {
         assert_eq!(config(&["--admin-token", ""]).admin_token, None);
+    }
+}
+
+/// The `did:web` a registry base URL's host and port resolve to:
+/// `https://registry.example:8443/` is `did:web:registry.example%3A8443`.
+fn registry_did_from_url(base_url: &str) -> String {
+    let authority = base_url
+        .split_once("://")
+        .map_or(base_url, |(_, rest)| rest)
+        .split('/')
+        .next()
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    format!("did:web:{}", authority.replacen(':', "%3A", 1))
+}
+
+#[cfg(test)]
+mod registry_did_tests {
+    use super::registry_did_from_url;
+
+    #[test]
+    fn the_registry_did_defaults_to_the_did_web_of_its_url() {
+        assert_eq!(
+            registry_did_from_url("https://Registry.example"),
+            "did:web:registry.example"
+        );
+        assert_eq!(
+            registry_did_from_url("http://localhost:8090/"),
+            "did:web:localhost%3A8090"
+        );
     }
 }

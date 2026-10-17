@@ -19,15 +19,14 @@ use identity_hub_core::messages::{
 use identity_hub_core::store::StoredCredentialBatch;
 use identity_hub_core::sts::{self, StsTokenRequest};
 
-use crate::auth::{
-    AuthError, check_trusted_issuer, verify_bearer_token, verify_nested_access_token,
-};
+use crate::auth::{AuthError, verify_bearer_token, verify_nested_access_token};
 use crate::config::{HolderApproval, Mode};
 use crate::issuer::{
     CredentialDefinition, CredentialRecordStatus, Holder, HolderStatus, IssuanceProcess,
     IssuedCredential, MAX_PENDING_PROCESSES, MAX_PENDING_PROCESSES_PER_HOLDER,
     MAX_REQUEST_CREDENTIALS, ProcessState, STATUS_LIST_CONTEXT, STATUS_LIST_PATH,
 };
+use crate::registry_trust::check_issuer;
 use crate::state::AppState;
 use crate::validation::{
     ValidationError, check_known_holder_pid, validate_offer_credentials, validate_status,
@@ -62,6 +61,24 @@ fn bearer_header(headers: &HeaderMap) -> Option<&str> {
     headers
         .get(header::AUTHORIZATION)
         .and_then(|v| v.to_str().ok())
+}
+
+/// The verified caller's DID (`iss` of its Self-Issued ID Token).
+fn caller(claims: &serde_json::Value) -> &str {
+    claims
+        .get("iss")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("")
+}
+
+/// The `iss` a JWT-format credential container's payload claims (its
+/// signature is checked by `verify_credential_proofs`).
+fn credential_issuer(
+    container: &identity_hub_core::messages::CredentialContainer,
+) -> Option<String> {
+    let jws = container.payload.as_str()?;
+    let (_, _, payload) = dcp_core::decode_jws_unverified(jws).ok()?;
+    payload.get("iss")?.as_str().map(str::to_string)
 }
 
 fn auth_error_response(err: AuthError) -> Response {
@@ -341,7 +358,9 @@ fn build_presentation(
 /// `nbf`, `iat`, `capabilityInvocation`, and `jti` replay are all real
 /// checks now too. On top of that envelope validation, the caller's `iss`
 /// must also be on `state.config.trusted_issuer_dids`
-/// (`crate::auth::check_trusted_issuer`) - a genuinely valid, correctly
+/// (`crate::auth::check_trusted_issuer`), or, with a trusted issuers
+/// registry configured, trusted by it for every delivered credential type
+/// (`crate::registry_trust`) - a genuinely valid, correctly
 /// self-signed token from an unrelated but otherwise-legitimate DID is
 /// still not this service's issuer, and (2026-09-20 fix, HIGH) an *empty*
 /// `trusted_issuer_dids` now denies every caller rather than none, so a
@@ -374,7 +393,12 @@ async fn storage_write(
         Ok(claims) => claims,
         Err(err) => return auth_error_response(err),
     };
-    if let Err(err) = check_trusted_issuer(&claims, &state.config.trusted_issuer_dids) {
+    let delivered_types: Vec<String> = message
+        .credentials
+        .iter()
+        .map(|c| c.credential_type.clone())
+        .collect();
+    if let Err(err) = check_issuer(&state, caller(&claims), &delivered_types).await {
         return auth_error_response(err);
     }
     if let Err(err) = validate_status(&message.status) {
@@ -392,6 +416,20 @@ async fn storage_write(
     .await
     {
         return validation_error_response(err);
+    }
+    // With a registry, each credential's own issuer must be trusted for its
+    // type too, not only the caller delivering it: the registry says who
+    // may issue what. (The static list only ever named callers.)
+    if state.registry_trust.is_some() {
+        for container in &message.credentials {
+            let Some(vc_issuer) = credential_issuer(container) else {
+                return auth_error_response(AuthError::UntrustedIssuer(String::new()));
+            };
+            let types = [container.credential_type.clone()];
+            if let Err(err) = check_issuer(&state, &vc_issuer, &types).await {
+                return auth_error_response(err);
+            }
+        }
     }
     state.store.store(StoredCredentialBatch {
         issuer_pid: message.issuer_pid,
@@ -437,7 +475,12 @@ async fn credential_offer(
         Ok(claims) => claims,
         Err(err) => return auth_error_response(err),
     };
-    if let Err(err) = check_trusted_issuer(&claims, &state.config.trusted_issuer_dids) {
+    let offered_types: Vec<String> = message
+        .credentials
+        .iter()
+        .filter_map(|c| c.credential_type.clone())
+        .collect();
+    if let Err(err) = check_issuer(&state, caller(&claims), &offered_types).await {
         return auth_error_response(err);
     }
     if let Err(err) = validate_offer_credentials(

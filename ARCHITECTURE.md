@@ -1129,6 +1129,35 @@ including the first (wrong) fixes tried along the way).
   whether this hub needs a stable, persisted identity across restarts (a
   real deployment would).
 
+## Trusted issuers registry
+
+**2026-10-17.** `--trusted-issuers-registry` (`Config::trusted_issuers_registry`)
+replaces the static `--trusted-issuer-did` list with the dataspace's trusted
+issuers registry (`ds-trusted-issuers-registry-rs`), through its
+network-free `trusted-issuers-core` crate (git dependency pinned by rev,
+sharing this project's `ds-dcp-core-rs` rev). `crate::registry_trust`
+fetches `GET {registry}/v1/snapshot`, resolves the registry's `did:web`,
+verifies the snapshot (`verify_snapshot`: ES256, `typ`, issuer, `kid`, expiry,
+and the registry's own write rules on its content) and caches it, refreshing
+after a quarter of its lifetime (the registry's `Cache-Control`) or 30 s
+before expiry. Both requests go through `OutboundPolicy`, to which the
+registry's base-URL host and DID host are added.
+
+Unlike the static list, which names callers only, the registry says who may
+issue which credential types, so the check is per type, and covers the
+credential's own issuer as well as the caller: the Storage API checks the
+caller against every delivered `credentialType` and, after proof
+verification, each container's own `iss` against its type; the Credential
+Offer API checks the caller against every offered `credentialType` (an offer
+naming no type needs the caller trusted for at least one of its own); the
+OID4VCI wallet checks the credential's `iss` against the type it files it
+under. Fails closed: no verified, unexpired snapshot means nobody is
+trusted (`AuthError::TrustRegistryUnavailable`); a failed refresh keeps the
+cached snapshot until it expires. Coverage: `tests/trusted_issuers_registry.rs`
+(a stand-in registry serving a snapshot signed with the registry's own
+`sign_snapshot`), plus the refresh schedule's unit test. Without the flag,
+behaviour is unchanged, so the DCP TCK configuration is unaffected.
+
 ## OID4VCI alongside DCP
 
 **2026-10-14.** Both process modes also speak
