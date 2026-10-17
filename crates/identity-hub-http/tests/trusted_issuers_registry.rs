@@ -12,6 +12,10 @@
 //! signed with `trusted_issuers_core::sign_snapshot`, the registry's own
 //! signing code). Identities live on `localhost`, not `127.0.0.1`: the
 //! registry refuses IP addresses in `did:web` ids.
+//!
+//! Needs the `trusted-issuers-registry` feature:
+//! `cargo test -p identity-hub-http --features trusted-issuers-registry`.
+#![cfg(feature = "trusted-issuers-registry")]
 
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};

@@ -70,11 +70,13 @@ struct CommonArgs {
     /// for exactly the credential types the registry's signed snapshot
     /// accredits it for, checked for the caller and for each delivered
     /// credential's own issuer. Its host is added to the outbound allow-list.
+    #[cfg(feature = "trusted-issuers-registry")]
     #[arg(long)]
     trusted_issuers_registry: Option<String>,
     /// The registry's own `did:web`, holding the key that signs its
     /// snapshot. Defaults to the `did:web` of `--trusted-issuers-registry`'s
     /// host and port.
+    #[cfg(feature = "trusted-issuers-registry")]
     #[arg(long, requires = "trusted_issuers_registry")]
     trusted_issuers_registry_did: Option<String>,
     /// A `holderPid` this Credential Service should accept on the Storage
@@ -151,6 +153,7 @@ impl CommonArgs {
             scope_pattern: self.scope_pattern,
             insecure_http: self.insecure_http,
             trusted_issuer_dids: self.trusted_issuer_dids,
+            #[cfg(feature = "trusted-issuers-registry")]
             trusted_issuers_registry: self.trusted_issuers_registry.map(|base_url| {
                 let did = self
                     .trusted_issuers_registry_did
@@ -201,15 +204,26 @@ async fn main() {
     // after standing the process up), but an operator who forgot the flag
     // entirely should find out from the logs, not from every write silently
     // getting 401.
-    if let Some(registry) = &config.trusted_issuers_registry {
-        tracing::info!(
-            registry = %registry.base_url,
-            registry_did = %registry.did,
-            "issuers are trusted through the trusted issuers registry's signed snapshot"
-        );
-    } else if config.mode == Mode::CredentialService && config.trusted_issuer_dids.is_empty() {
+    #[cfg(feature = "trusted-issuers-registry")]
+    let via_registry = match &config.trusted_issuers_registry {
+        Some(registry) => {
+            tracing::info!(
+                registry = %registry.base_url,
+                registry_did = %registry.did,
+                "issuers are trusted through the trusted issuers registry's signed snapshot"
+            );
+            true
+        }
+        None => false,
+    };
+    #[cfg(not(feature = "trusted-issuers-registry"))]
+    let via_registry = false;
+    if !via_registry
+        && config.mode == Mode::CredentialService
+        && config.trusted_issuer_dids.is_empty()
+    {
         tracing::warn!(
-            "no --trusted-issuer-did or --trusted-issuers-registry configured: the Storage API \
+            "no --trusted-issuer-did (or --trusted-issuers-registry) configured: the Storage API \
              (POST /credentials) and Credential Offer API (POST /offers) will reject every write \
              with 401 until one is given"
         );
@@ -514,6 +528,7 @@ mod cli_admin_flag_tests {
     }
 }
 
+#[cfg(feature = "trusted-issuers-registry")]
 /// The `did:web` a registry base URL's host and port resolve to:
 /// `https://registry.example:8443/` is `did:web:registry.example%3A8443`.
 fn registry_did_from_url(base_url: &str) -> String {
@@ -528,6 +543,42 @@ fn registry_did_from_url(base_url: &str) -> String {
 }
 
 #[cfg(test)]
+mod registry_feature_tests {
+    use super::Cli;
+    use clap::Parser;
+
+    fn parses(extra: &[&str]) -> bool {
+        let mut argv = vec!["identity-hub", "credential-service"];
+        argv.extend_from_slice(extra);
+        Cli::try_parse_from(argv).is_ok()
+    }
+
+    /// The registry integration is behind the `trusted-issuers-registry`
+    /// feature: a default build has no registry flags at all.
+    #[test]
+    #[cfg(not(feature = "trusted-issuers-registry"))]
+    fn without_the_feature_the_registry_flags_do_not_exist() {
+        assert!(!parses(&[
+            "--trusted-issuers-registry",
+            "https://registry.example"
+        ]));
+        assert!(!parses(&[
+            "--trusted-issuers-registry-did",
+            "did:web:registry.example"
+        ]));
+    }
+
+    #[test]
+    #[cfg(feature = "trusted-issuers-registry")]
+    fn with_the_feature_the_registry_flags_exist() {
+        assert!(parses(&[
+            "--trusted-issuers-registry",
+            "https://registry.example"
+        ]));
+    }
+}
+
+#[cfg(all(test, feature = "trusted-issuers-registry"))]
 mod registry_did_tests {
     use super::registry_did_from_url;
 

@@ -41,7 +41,8 @@ pub enum HolderApproval {
 }
 
 /// Where to find the dataspace's trusted issuers registry
-/// (`--trusted-issuers-registry`).
+/// (`--trusted-issuers-registry`; `trusted-issuers-registry` feature).
+#[cfg(feature = "trusted-issuers-registry")]
 #[derive(Debug, Clone)]
 pub struct TrustedIssuersRegistry {
     /// Base URL of the registry's public API (`https://registry.example`);
@@ -116,6 +117,7 @@ pub struct Config {
     /// "Verify Trust" step: an issuer is trusted for the credential types
     /// its accreditation chain in the registry's signed snapshot covers,
     /// and only for those - see `crate::registry_trust`.
+    #[cfg(feature = "trusted-issuers-registry")]
     pub trusted_issuers_registry: Option<TrustedIssuersRegistry>,
     /// Allow-list of `holderPid` correlation ids this Credential Service was
     /// configured to expect on the Storage API (`POST /credentials`) - the
@@ -206,6 +208,7 @@ impl Config {
             scope_pattern: DEFAULT_SCOPE_PATTERN.to_string(),
             insecure_http: true,
             trusted_issuer_dids: Vec::new(),
+            #[cfg(feature = "trusted-issuers-registry")]
             trusted_issuers_registry: None,
             known_holder_pids: Vec::new(),
             allowed_outbound_hosts: Vec::new(),
@@ -224,6 +227,7 @@ impl Config {
 
     /// Builder-style setter for
     /// [`trusted_issuers_registry`](Self::trusted_issuers_registry).
+    #[cfg(feature = "trusted-issuers-registry")]
     pub fn with_trusted_issuers_registry(
         mut self,
         base_url: impl Into<String>,

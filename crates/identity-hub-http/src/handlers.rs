@@ -26,7 +26,7 @@ use crate::issuer::{
     IssuedCredential, MAX_PENDING_PROCESSES, MAX_PENDING_PROCESSES_PER_HOLDER,
     MAX_REQUEST_CREDENTIALS, ProcessState, STATUS_LIST_CONTEXT, STATUS_LIST_PATH,
 };
-use crate::registry_trust::check_issuer;
+use crate::registry_trust::{check_issuer, registry_configured};
 use crate::state::AppState;
 use crate::validation::{
     ValidationError, check_known_holder_pid, validate_offer_credentials, validate_status,
@@ -420,7 +420,7 @@ async fn storage_write(
     // With a registry, each credential's own issuer must be trusted for its
     // type too, not only the caller delivering it: the registry says who
     // may issue what. (The static list only ever named callers.)
-    if state.registry_trust.is_some() {
+    if registry_configured(&state) {
         for container in &message.credentials {
             let Some(vc_issuer) = credential_issuer(container) else {
                 return auth_error_response(AuthError::UntrustedIssuer(String::new()));

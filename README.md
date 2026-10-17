@@ -88,6 +88,9 @@ test plan against it (`ci/oidf/run.sh`).
 
 ### Trusted issuers registry
 
+Behind the `trusted-issuers-registry` Cargo feature, off by default
+(`cargo build --features identity-hub-http/trusted-issuers-registry`;
+without it the binary has no registry flags and no registry dependency).
 With `--trusted-issuers-registry <url>` (and optionally
 `--trusted-issuers-registry-did`, which defaults to the `did:web` of the
 URL's host), a Credential Service takes its "Verify Trust" decisions from
@@ -246,8 +249,9 @@ cargo test -p identity-hub-http --test dcp_tck -- --ignored --nocapture   # need
 # given (2026-09-20 fix, HIGH; see Config::trusted_issuer_dids's doc comment):
 cargo run -p identity-hub-http --bin identity-hub -- credential-service --did-host localhost:8080 --trusted-issuer-did did:web:some-issuer.example:issuer
 
-# ...or trust whatever the dataspace's trusted issuers registry accredits:
-cargo run -p identity-hub-http --bin identity-hub -- credential-service --did-host localhost:8080 --trusted-issuers-registry https://registry.example
+# ...or trust whatever the dataspace's trusted issuers registry accredits
+# (needs the trusted-issuers-registry feature):
+cargo run -p identity-hub-http --features trusted-issuers-registry --bin identity-hub -- credential-service --did-host localhost:8080 --trusted-issuers-registry https://registry.example
 
 # Minimal Issuer Service (CIP only):
 cargo run -p identity-hub-http --bin identity-hub -- issuer-service --bind 0.0.0.0:8081 --did-host localhost:8081

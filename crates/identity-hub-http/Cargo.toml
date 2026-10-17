@@ -17,7 +17,7 @@ identity-hub-graph = { path = "../identity-hub-graph" }
 identity-hub-contreforts = { path = "../identity-hub-contreforts" }
 contreforts-core = { path = "../../vendor/contreforts-core" }
 ds-dcp-core-rs = { workspace = true }
-trusted-issuers-core = { workspace = true }
+trusted-issuers-core = { workspace = true, optional = true }
 axum = { workspace = true }
 tokio = { workspace = true }
 tower = { workspace = true }
@@ -32,6 +32,13 @@ regex = { workspace = true }
 clap = { workspace = true }
 base64 = { workspace = true }
 flate2 = { workspace = true }
+
+[features]
+# Trusting issuers through the dataspace's trusted issuers registry
+# (`--trusted-issuers-registry`, see src/registry_trust.rs). Off by default:
+# without it the binary has no registry flags and does not depend on
+# trusted-issuers-core.
+trusted-issuers-registry = ["dep:trusted-issuers-core"]
 
 [dev-dependencies]
 # Runs the real `eclipsedataspacetck/dcp-tck-runtime` container in

@@ -1158,6 +1158,14 @@ cached snapshot until it expires. Coverage: `tests/trusted_issuers_registry.rs`
 `sign_snapshot`), plus the refresh schedule's unit test. Without the flag,
 behaviour is unchanged, so the DCP TCK configuration is unaffected.
 
+The whole integration is behind the `trusted-issuers-registry` Cargo
+feature, off by default: without it `trusted-issuers-core` is not a
+dependency, the registry flags and `Config::trusted_issuers_registry` do not
+exist, and `registry_trust::check_issuer` always uses the static list. CI
+checks the default build has no registry dependency and lints and tests the
+feature build (`cargo test -p identity-hub-http --features
+trusted-issuers-registry`, which includes `tests/trusted_issuers_registry.rs`).
+
 ## OID4VCI alongside DCP
 
 **2026-10-14.** Both process modes also speak

@@ -17,20 +17,31 @@
 //! Fails closed: with no snapshot that verifies and has not expired, nobody
 //! is trusted. A failed refresh keeps using the cached snapshot until it
 //! expires, so a registry outage shorter than the TTL changes nothing.
+//!
+//! Behind the `trusted-issuers-registry` Cargo feature (off by default).
+//! Without it only [`check_issuer`] remains, and it always uses the static
+//! list.
 
+#[cfg(feature = "trusted-issuers-registry")]
 use std::sync::Arc;
 
+#[cfg(feature = "trusted-issuers-registry")]
 use dcp_core::now_secs;
+#[cfg(feature = "trusted-issuers-registry")]
 use tokio::sync::Mutex;
+#[cfg(feature = "trusted-issuers-registry")]
 use trusted_issuers_core::{TrustList, snapshot_kid, verify_snapshot};
 
 use crate::auth::{AuthError, check_trusted_issuer};
+#[cfg(feature = "trusted-issuers-registry")]
 use crate::config::TrustedIssuersRegistry;
 use crate::state::AppState;
 
+#[cfg(feature = "trusted-issuers-registry")]
 /// Refetch a snapshot this long before it expires at the latest.
 pub const REFRESH_MARGIN_SECS: u64 = 30;
 
+#[cfg(feature = "trusted-issuers-registry")]
 /// Whether a snapshot fetched at `fetched_at` and valid from `iat` to `exp`
 /// should be refetched at `now`: once a quarter of its lifetime has passed
 /// since the fetch, or within [`REFRESH_MARGIN_SECS`] of its expiry.
@@ -39,17 +50,20 @@ pub fn needs_refresh(fetched_at: u64, iat: u64, exp: u64, now: u64) -> bool {
     now >= fetched_at.saturating_add(lifetime / 4) || now.saturating_add(REFRESH_MARGIN_SECS) >= exp
 }
 
+#[cfg(feature = "trusted-issuers-registry")]
 struct Cached {
     list: Arc<TrustList>,
     fetched_at: u64,
 }
 
+#[cfg(feature = "trusted-issuers-registry")]
 /// The registry this service trusts, and its last verified snapshot.
 pub struct RegistryTrust {
     pub source: TrustedIssuersRegistry,
     cached: Mutex<Option<Cached>>,
 }
 
+#[cfg(feature = "trusted-issuers-registry")]
 impl RegistryTrust {
     pub fn new(source: TrustedIssuersRegistry) -> Self {
         Self {
@@ -170,15 +184,32 @@ pub async fn check_issuer(
     iss: &str,
     credential_types: &[String],
 ) -> Result<(), AuthError> {
-    match &state.registry_trust {
-        Some(registry) => registry.check(state, iss, credential_types).await,
-        None => check_trusted_issuer(
-            &serde_json::json!({ "iss": iss }),
-            &state.config.trusted_issuer_dids,
-        ),
+    #[cfg(feature = "trusted-issuers-registry")]
+    if let Some(registry) = &state.registry_trust {
+        return registry.check(state, iss, credential_types).await;
+    }
+    #[cfg(not(feature = "trusted-issuers-registry"))]
+    let _ = credential_types;
+    check_trusted_issuer(
+        &serde_json::json!({ "iss": iss }),
+        &state.config.trusted_issuer_dids,
+    )
+}
+
+/// Whether issuers are trusted through a registry (so each delivered
+/// credential's own issuer is checked too); always `false` without the
+/// `trusted-issuers-registry` feature.
+pub fn registry_configured(state: &AppState) -> bool {
+    #[cfg(feature = "trusted-issuers-registry")]
+    return state.registry_trust.is_some();
+    #[cfg(not(feature = "trusted-issuers-registry"))]
+    {
+        let _ = state;
+        false
     }
 }
 
+#[cfg(feature = "trusted-issuers-registry")]
 #[cfg(test)]
 mod tests {
     use super::*;
