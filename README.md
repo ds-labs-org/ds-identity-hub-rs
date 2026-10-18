@@ -75,8 +75,9 @@ Creating an offer (`POST /oid4vci/offers` on the Issuer Service) and asking
 the wallet to redeem one are operator actions neither spec defines; both
 require HTTP Basic auth with the configured STS client credentials. The
 wallet keeps the DCP side's posture: outbound allow-list on every request,
-and only credentials from a `--trusted-issuer-did`, genuinely signed and
-bound to this Credential Service's own DID, are stored.
+and only credentials from a trusted issuer (a `--trusted-issuer-did`, or
+one the trusted issuers registry accredits for the credential's type),
+genuinely signed and bound to this Credential Service's own DID, are stored.
 
 Against third-party issuers the wallet also uses DPoP when the issuer
 advertises it and `private_key_jwt` client authentication when started with
@@ -84,6 +85,33 @@ advertises it and `private_key_jwt` client authentication when started with
 Credential Offer Endpoint (`GET /oid4vci/wallet/credential_offer`), off by
 default. CI runs the OpenID Foundation conformance suite's OID4VCI wallet
 test plan against it (`ci/oidf/run.sh`).
+
+### Trusted issuers registry
+
+Behind the `trusted-issuers-registry` Cargo feature, off by default
+(`cargo build --features identity-hub-http/trusted-issuers-registry`;
+without it the binary has no registry flags and no registry dependency).
+With `--trusted-issuers-registry <url>` (and optionally
+`--trusted-issuers-registry-did`, which defaults to the `did:web` of the
+URL's host), a Credential Service takes its "Verify Trust" decisions from
+the dataspace's
+[trusted issuers registry](https://github.com/ds-labs-org/ds-trusted-issuers-registry-rs)
+instead of the static `--trusted-issuer-did` list, which is then not
+consulted. It fetches the registry's signed snapshot, verifies it against
+the key in the registry's DID document (both through the outbound
+allow-list, to which the registry's hosts are added), and checks locally:
+
+- Storage API: the caller must be trusted for every delivered credential's
+  type, and each credential's own `iss` for its type.
+- Credential Offer API: the caller must be trusted for every offered
+  credential type.
+- OID4VCI wallet: the issued credential's `iss` must be trusted for the
+  type it is filed under.
+
+The snapshot is refreshed after a quarter of its lifetime, so a suspension
+in the registry reaches the hub within about a quarter of the registry's
+snapshot TTL. Without a snapshot that verifies and has not expired, nobody
+is trusted; a failed refresh keeps the cached snapshot until it expires.
 
 See [`ARCHITECTURE.md`](ARCHITECTURE.md) for exactly what's implemented,
 simplified, or out of scope, and for a real, date-stamped conformance run
@@ -220,6 +248,10 @@ cargo test -p identity-hub-http --test dcp_tck -- --ignored --nocapture   # need
 # Credential Offer API reject every write with 401 until at least one is
 # given (2026-09-20 fix, HIGH; see Config::trusted_issuer_dids's doc comment):
 cargo run -p identity-hub-http --bin identity-hub -- credential-service --did-host localhost:8080 --trusted-issuer-did did:web:some-issuer.example:issuer
+
+# ...or trust whatever the dataspace's trusted issuers registry accredits
+# (needs the trusted-issuers-registry feature):
+cargo run -p identity-hub-http --features trusted-issuers-registry --bin identity-hub -- credential-service --did-host localhost:8080 --trusted-issuers-registry https://registry.example
 
 # Minimal Issuer Service (CIP only):
 cargo run -p identity-hub-http --bin identity-hub -- issuer-service --bind 0.0.0.0:8081 --did-host localhost:8081
