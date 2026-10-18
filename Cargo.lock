@@ -3381,7 +3381,7 @@ dependencies = [
 [[package]]
 name = "trusted-issuers-core"
 version = "0.1.0"
-source = "git+https://github.com/ds-labs-org/ds-trusted-issuers-registry-rs?rev=39f742412e6965feec936f568c216ef08e1c8792#39f742412e6965feec936f568c216ef08e1c8792"
+source = "git+https://github.com/ds-labs-org/ds-trusted-issuers-registry-rs?rev=78d1a91cf8cbfa2558ce0c047ec19111e24175d3#78d1a91cf8cbfa2558ce0c047ec19111e24175d3"
 dependencies = [
  "base64 0.22.1",
  "ds-dcp-core-rs",
