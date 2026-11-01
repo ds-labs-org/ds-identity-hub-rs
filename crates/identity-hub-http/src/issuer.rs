@@ -298,13 +298,67 @@ pub struct HolderUpdate {
     pub properties: Option<Map<String, Value>>,
 }
 
-/// Holder records, keyed by id and indexed by DID, kept in insertion order.
-/// Never evicts - see this module's doc comment.
+/// Holder records, keyed by id and indexed by DID ([`holder_key`] form),
+/// kept in insertion order. Never evicts - see this module's doc comment.
 #[derive(Default)]
 pub struct HolderRegistry {
     holders: HashMap<String, Holder>,
     by_did: HashMap<String, String>,
     order: Vec<String>,
+}
+
+/// The spelling a holder's DID is indexed by, so that two spellings that
+/// resolve to the same DID document are one holder (2026-11-01 audit, M2):
+/// for `did:web`, the host is lowercased (DNS names are case-insensitive)
+/// and every `%xx` escape's hex digits are uppercased (`dcp_core` reads
+/// `%3a` as `%3A`). These are the rules of the trusted issuers registry's
+/// `canonical_did`. Nothing is decoded, and the path keeps its case. The
+/// record keeps the spelling it was first seen with. Other methods are
+/// indexed as they are.
+pub fn holder_key(did: &str) -> String {
+    let Some(rest) = did.strip_prefix("did:web:") else {
+        return did.to_string();
+    };
+    let segments: Vec<String> = rest
+        .split(':')
+        .enumerate()
+        .map(|(i, segment)| {
+            let (host, tail) = segment.split_at(segment.find('%').unwrap_or(segment.len()));
+            if i == 0
+                && host
+                    .bytes()
+                    .all(|c| c.is_ascii_alphanumeric() || matches!(c, b'.' | b'-'))
+            {
+                uppercase_escapes(&(host.to_ascii_lowercase() + tail))
+            } else {
+                uppercase_escapes(segment)
+            }
+        })
+        .collect();
+    format!("did:web:{}", segments.join(":"))
+}
+
+/// Uppercases the two hex digits of every `%xx` escape in `s`.
+fn uppercase_escapes(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut rest = s;
+    while let Some(at) = rest.find('%') {
+        out.push_str(&rest[..at]);
+        let escape = &rest[at..];
+        match escape.get(1..3) {
+            Some(hex) if hex.bytes().all(|c| c.is_ascii_hexdigit()) => {
+                out.push('%');
+                out.push_str(&hex.to_ascii_uppercase());
+                rest = &escape[3..];
+            }
+            _ => {
+                out.push('%');
+                rest = &escape[1..];
+            }
+        }
+    }
+    out.push_str(rest);
+    out
 }
 
 impl HolderRegistry {
@@ -324,8 +378,11 @@ impl HolderRegistry {
         self.holders.get_mut(holder_id)
     }
 
+    /// The holder whose DID is `did` in any spelling [`holder_key`] folds.
     pub fn by_did(&self, did: &str) -> Option<&Holder> {
-        self.by_did.get(did).and_then(|id| self.holders.get(id))
+        self.by_did
+            .get(&holder_key(did))
+            .and_then(|id| self.holders.get(id))
     }
 
     pub fn all(&self) -> impl Iterator<Item = &Holder> {
@@ -341,10 +398,11 @@ impl HolderRegistry {
                 holder.holder_id
             )));
         }
-        if self.by_did.contains_key(&holder.did) {
+        let key = holder_key(&holder.did);
+        if let Some(existing) = self.by_did.get(&key).and_then(|id| self.holders.get(id)) {
             return Err(IssuerError::Conflict(format!(
                 "a holder with did '{}' already exists",
-                holder.did
+                existing.did
             )));
         }
         if self.holders.len() >= MAX_HOLDERS {
@@ -352,8 +410,7 @@ impl HolderRegistry {
                 "holder registry is full ({MAX_HOLDERS})"
             )));
         }
-        self.by_did
-            .insert(holder.did.clone(), holder.holder_id.clone());
+        self.by_did.insert(key, holder.holder_id.clone());
         self.order.push(holder.holder_id.clone());
         self.holders
             .insert(holder.holder_id.clone(), holder.clone());
@@ -688,6 +745,27 @@ impl QuerySpec {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn holder_key_folds_only_what_did_web_resolution_folds() {
+        let did = "did:web:127.0.0.1%3A8080:holder";
+        assert_eq!(holder_key("did:web:127.0.0.1%3a8080:holder"), did);
+        assert_eq!(
+            holder_key("did:web:Acme.EXAMPLE%3a443:Users:Bob"),
+            "did:web:acme.example%3A443:Users:Bob",
+            "the host is case-insensitive, the path is not"
+        );
+        assert_eq!(
+            holder_key("did:web:a.example:x%2fy"),
+            "did:web:a.example:x%2Fy"
+        );
+        assert_eq!(
+            holder_key("did:web:a.example:100%"),
+            "did:web:a.example:100%"
+        );
+        assert_eq!(holder_key("did:web:a.example:%zz"), "did:web:a.example:%zz");
+        assert_eq!(holder_key("did:key:z6MkAbC"), "did:key:z6MkAbC");
+    }
 
     #[test]
     fn status_list_bits_are_msb_first() {

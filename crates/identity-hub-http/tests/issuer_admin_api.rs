@@ -300,12 +300,8 @@ impl FakeHolder {
         self.identity.own_did()
     }
 
-    fn token(&self, aud: &str) -> String {
-        self.token_as(self.did(), aud)
-    }
-
     /// A Self-Issued ID Token signed with this holder's key whose `iss` and
-    /// `sub` are `did`.
+    /// `sub` are `did` (normally [`FakeHolder::did`]).
     fn token_as(&self, did: &str, aud: &str) -> String {
         let now = dcp_core::now_secs();
         dcp_core::sign_jws(
