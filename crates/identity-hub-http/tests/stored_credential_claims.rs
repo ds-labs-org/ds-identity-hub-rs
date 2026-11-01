@@ -85,6 +85,24 @@ fn vc(issuer: &ServiceIdentity, subject: &str, exp_from_now: i64) -> String {
 /// `deliverer` sends a `CredentialMessage` carrying `payload` to the
 /// Storage API.
 async fn deliver(base: &str, service_did: &str, deliverer: &ServiceIdentity, payload: &str) -> u16 {
+    deliver_labelled(
+        base,
+        service_did,
+        deliverer,
+        payload,
+        "MembershipCredential",
+    )
+    .await
+}
+
+/// [`deliver`] with the container's `credentialType` set to `label`.
+async fn deliver_labelled(
+    base: &str,
+    service_did: &str,
+    deliverer: &ServiceIdentity,
+    payload: &str,
+    label: &str,
+) -> u16 {
     let now = now_secs();
     let token = sign_jws(
         &json!({
@@ -102,7 +120,7 @@ async fn deliver(base: &str, service_did: &str, deliverer: &ServiceIdentity, pay
             "@context": ["https://w3id.org/dspace-dcp/v1.0/dcp.jsonld"],
             "type": "CredentialMessage",
             "issuerPid": "issuer-pid", "holderPid": "holder-pid", "status": "ISSUED",
-            "credentials": [{"credentialType": "MembershipCredential", "payload": payload, "format": "jwt"}],
+            "credentials": [{"credentialType": label, "payload": payload, "format": "jwt"}],
         }))
         .send()
         .await
@@ -144,6 +162,38 @@ async fn the_storage_api_refuses_credentials_it_should_not_hold() {
         deliver(&base, &me, &issuer, &vc(&issuer, &me, 3600)).await,
         200,
         "a valid credential is still stored"
+    );
+}
+
+/// 2026-11-01 audit: a container's `credentialType` is the type the
+/// credential is filed, trust-checked and presented under, so it must be one
+/// of the credential's own `vc.type`. Otherwise a MembershipCredential
+/// labelled DataProcessorCredential is stored, the registry is asked about
+/// the label, and a verifier asking for a DataProcessorCredential is handed
+/// a MembershipCredential.
+#[tokio::test]
+async fn a_credential_is_stored_only_under_a_type_it_has() {
+    let issuer = spawn_party("issuer").await;
+    let (state, base) = spawn_credential_service(&issuer).await;
+    let me = state.identity.own_did().to_string();
+
+    let membership = vc(&issuer, &me, 3600);
+    assert_eq!(
+        deliver_labelled(&base, &me, &issuer, &membership, "DataProcessorCredential").await,
+        400,
+        "a MembershipCredential was stored as a DataProcessorCredential"
+    );
+    assert!(
+        state
+            .store
+            .credentials_of_types(&["DataProcessorCredential".into()])
+            .is_empty(),
+        "nothing is filed under a type the credential does not have"
+    );
+    assert_eq!(
+        deliver_labelled(&base, &me, &issuer, &membership, "MembershipCredential").await,
+        200,
+        "the same credential under its own type is stored"
     );
 }
 
