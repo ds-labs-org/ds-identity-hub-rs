@@ -52,6 +52,8 @@ pub enum ValidationError {
     ForeignSubject(String),
     #[error("credential is outside its validity period")]
     OutsideValidity,
+    #[error("credentialType '{0}' is not one of the credential's own vc.type")]
+    TypeNotInCredential(String),
 }
 
 /// How far a credential's `nbf` may be ahead of this clock.
@@ -67,7 +69,9 @@ const CLOCK_SKEW_SECS: u64 = 60;
 /// must be inside its validity window (`nbf`, `exp`, when present). Before
 /// this, a trusted deliverer could store a credential signed by anybody,
 /// already expired, or belonging to another holder, and the Presentation
-/// API would hand it out as this holder's.
+/// API would hand it out as this holder's. The container's `credentialType`
+/// must also be one of the credential's own `vc.type` (2026-11-01 audit):
+/// it is the type the registry is asked about and presentations select by.
 pub fn check_credential_claims(
     credentials: &[CredentialContainer],
     own_did: &str,
@@ -82,6 +86,11 @@ pub fn check_credential_claims(
         })?;
         let (_, _, payload) =
             dcp_core::decode_jws_unverified(jws).map_err(ValidationError::UnverifiableProof)?;
+        if !has_type(&payload, &container.credential_type) {
+            return Err(ValidationError::TypeNotInCredential(
+                container.credential_type.clone(),
+            ));
+        }
         let issuer = payload.get("iss").and_then(Value::as_str).unwrap_or("");
         if let Some(trusted) = trusted_issuer_dids
             && !trusted.iter().any(|t| t == issuer)
@@ -105,6 +114,16 @@ pub fn check_credential_claims(
         }
     }
     Ok(())
+}
+
+/// Whether a JWT credential's `vc.type` (an array, or a single string)
+/// contains `credential_type`.
+fn has_type(payload: &Value, credential_type: &str) -> bool {
+    match payload.pointer("/vc/type") {
+        Some(Value::String(only)) => only == credential_type,
+        Some(Value::Array(types)) => types.iter().any(|t| t.as_str() == Some(credential_type)),
+        _ => false,
+    }
 }
 
 /// Whether `now` is inside a JWT's `nbf`..`exp` window (each bound only when
