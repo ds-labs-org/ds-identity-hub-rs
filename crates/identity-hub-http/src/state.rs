@@ -283,38 +283,6 @@ impl AppState {
             config.sts_client_id.clone(),
             config.sts_client_secret.clone(),
         );
-        // `host.docker.internal` always resolves to loopback for this
-        // process's own outbound requests - it never means anything else
-        // outside a container. This is what lets this process, when run
-        // natively alongside a Dockerized `dcp-tck-runtime` container (see
-        // `tests/dcp_tck.rs`), resolve `did:web:host.docker.internal%3A<port>:...`
-        // identities the TCK hosts and self-references (e.g. its own
-        // `issuer`/`verifier` DIDs) via the exact same docker-published port
-        // the container itself reaches back through - see
-        // `tests/dcp_tck.rs`'s module doc comment for the full networking
-        // picture (this "hairpin" round trip is why a single, fixed
-        // published port works for both directions rather than needing
-        // `host.docker.internal` to be independently resolvable on the bare
-        // host). `reqwest::ClientBuilder::resolve` overrides only the IP;
-        // the port from the request URL is used unchanged.
-        let mut http = reqwest::Client::builder()
-            .connect_timeout(OUTBOUND_CONNECT_TIMEOUT)
-            .timeout(OUTBOUND_REQUEST_TIMEOUT)
-            .resolve(
-                HOST_DOCKER_INTERNAL,
-                std::net::SocketAddr::from(([127, 0, 0, 1], 0)),
-            );
-        // Operator-supplied trust anchors (`--extra-root-cert`), added to -
-        // never replacing - the built-in web roots.
-        for pem in &config.extra_root_certs {
-            let certificate = reqwest::Certificate::from_pem(pem)
-                .expect("--extra-root-cert is a PEM certificate");
-            http = http.add_root_certificate(certificate);
-        }
-        let http = http
-            .build()
-            .expect("reqwest client with a static host.docker.internal override builds");
-
         // The single source of truth for every host this process will ever
         // make an outbound HTTP request to - see `crate::outbound`'s module
         // doc comment for the matching rule and `../../ARCHITECTURE.md`'s
@@ -355,6 +323,40 @@ impl AppState {
                 .flatten()
             }));
         let outbound = OutboundPolicy::new(outbound_hosts);
+        // `host.docker.internal` always resolves to loopback for this
+        // `host.docker.internal` always resolves to loopback for this
+        // process's own outbound requests - it never means anything else
+        // outside a container. This is what lets this process, when run
+        // natively alongside a Dockerized `dcp-tck-runtime` container (see
+        // `tests/dcp_tck.rs`), resolve `did:web:host.docker.internal%3A<port>:...`
+        // identities the TCK hosts and self-references (e.g. its own
+        // `issuer`/`verifier` DIDs) via the exact same docker-published port
+        // the container itself reaches back through - see
+        // `tests/dcp_tck.rs`'s module doc comment for the full networking
+        // picture (this "hairpin" round trip is why a single, fixed
+        // published port works for both directions rather than needing
+        // `host.docker.internal` to be independently resolvable on the bare
+        // host). `reqwest::ClientBuilder::resolve` overrides only the IP;
+        // the port from the request URL is used unchanged.
+        let mut http = reqwest::Client::builder()
+            .connect_timeout(OUTBOUND_CONNECT_TIMEOUT)
+            .timeout(OUTBOUND_REQUEST_TIMEOUT)
+            .resolve(
+                HOST_DOCKER_INTERNAL,
+                std::net::SocketAddr::from(([127, 0, 0, 1], 0)),
+            )
+            .redirect(redirect_policy(outbound.clone()));
+        // Operator-supplied trust anchors (`--extra-root-cert`), added to -
+        // never replacing - the built-in web roots.
+        for pem in &config.extra_root_certs {
+            let certificate = reqwest::Certificate::from_pem(pem)
+                .expect("--extra-root-cert is a PEM certificate");
+            http = http.add_root_certificate(certificate);
+        }
+        let http = http
+            .build()
+            .expect("reqwest client with a static host.docker.internal override builds");
+
         #[cfg(feature = "trusted-issuers-registry")]
         let registry_trust = config
             .trusted_issuers_registry
@@ -389,6 +391,27 @@ impl AppState {
     pub fn base_url(&self) -> String {
         self.config.base_url()
     }
+}
+
+/// How many redirects one outbound request may follow, the same ceiling
+/// `reqwest`'s default policy uses.
+const MAX_OUTBOUND_REDIRECTS: usize = 10;
+
+/// The shared client's redirect policy: every hop is held to the same
+/// outbound allow-list as the URL the request started at, so an
+/// allow-listed host cannot bounce this service to one no part of its
+/// configuration names (2026-11-01 audit, M1). `reqwest`'s default policy
+/// follows any redirect to any host.
+fn redirect_policy(outbound: OutboundPolicy) -> reqwest::redirect::Policy {
+    reqwest::redirect::Policy::custom(move |attempt| {
+        if attempt.previous().len() >= MAX_OUTBOUND_REDIRECTS {
+            attempt.error("too many redirects")
+        } else if let Err(e) = outbound.check_url(attempt.url().as_str()) {
+            attempt.error(format!("redirect refused: {e}"))
+        } else {
+            attempt.follow()
+        }
+    })
 }
 
 /// The host of `url` (no port), for the outbound allow-list.

@@ -74,6 +74,7 @@ echo "Starting ds-identity-hub-rs Credential Service on :${RUST_PORT} ..."
 nohup "$REPO_ROOT/target/release/identity-hub" credential-service \
   --bind "0.0.0.0:${RUST_PORT}" --did-host "127.0.0.1:${RUST_PORT}" \
   --trusted-issuer-did "$STS_PARTY_DID" \
+  --sts-client-secret tck-secret \
   > "$RESULTS_DIR/service.log" 2>&1 &
 for _ in $(seq 1 60); do
   ss -tln 2>/dev/null | grep -q ":${RUST_PORT} " && break

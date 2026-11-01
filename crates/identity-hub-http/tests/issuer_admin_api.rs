@@ -182,6 +182,18 @@ impl Hub {
         holder_pid: &str,
         definition_ids: &[&str],
     ) -> reqwest::Response {
+        self.request_credentials_as(holder, holder.did(), holder_pid, definition_ids)
+            .await
+    }
+
+    /// [`Hub::request_credentials`] with `iss` and `sub` spelled as `did`.
+    async fn request_credentials_as(
+        &self,
+        holder: &FakeHolder,
+        did: &str,
+        holder_pid: &str,
+        definition_ids: &[&str],
+    ) -> reqwest::Response {
         let body = json!({
             "@context": ["https://w3id.org/dspace-dcp/v1.0/dcp.jsonld"],
             "type": "CredentialRequestMessage",
@@ -190,7 +202,7 @@ impl Hub {
         });
         self.client
             .post(format!("{}/credentials", self.public))
-            .bearer_auth(holder.token(&self.issuer_did()))
+            .bearer_auth(holder.token_as(did, &self.issuer_did()))
             .json(&body)
             .send()
             .await
@@ -288,12 +300,14 @@ impl FakeHolder {
         self.identity.own_did()
     }
 
-    fn token(&self, aud: &str) -> String {
+    /// A Self-Issued ID Token signed with this holder's key whose `iss` and
+    /// `sub` are `did` (normally [`FakeHolder::did`]).
+    fn token_as(&self, did: &str, aud: &str) -> String {
         let now = dcp_core::now_secs();
         dcp_core::sign_jws(
             &json!({
-                "iss": self.did(),
-                "sub": self.did(),
+                "iss": did,
+                "sub": did,
                 "aud": aud,
                 "iat": now,
                 "nbf": now,
@@ -1131,6 +1145,130 @@ async fn rejected_holders_are_refused() {
     assert!(hub.query("credentials", json!({})).await.is_empty());
 }
 
+/// 2026-11-01 audit, M2. did:web resolution reads `%3a` as `%3A`, so both
+/// spellings name the same DID document and the same key. The holder
+/// registry must treat them as one holder, or a rejected holder gets back in
+/// by respelling its own DID, and the operator can register one party twice.
+#[tokio::test]
+async fn a_rejected_holder_stays_rejected_under_another_spelling_of_its_did() {
+    let hub = spawn_hub(HolderApproval::Auto).await;
+    let holder = FakeHolder::spawn("holder").await;
+
+    let response = hub
+        .request_credentials(&holder, "pid-1", &["membership-credential"])
+        .await;
+    assert_eq!(response.status(), StatusCode::CREATED);
+    let holder_id = holder_by_did(&hub, holder.did()).await["holderId"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let (status, _) = hub
+        .post(&format!("/holders/{holder_id}/reject"), json!({}))
+        .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let respelled = holder.did().replace("%3A", "%3a");
+    assert_ne!(respelled, holder.did());
+    let response = hub
+        .request_credentials_as(&holder, &respelled, "pid-2", &["membership-credential"])
+        .await;
+    assert_eq!(
+        response.status(),
+        StatusCode::FORBIDDEN,
+        "{respelled} resolves to the rejected holder's own DID document"
+    );
+
+    let (status, body) = hub
+        .post("/holders", json!({"did": respelled.clone()}))
+        .await;
+    assert_eq!(
+        status,
+        StatusCode::CONFLICT,
+        "{respelled} is already registered under another spelling: {body}"
+    );
+    assert_eq!(
+        hub.query("holders", json!({})).await.len(),
+        1,
+        "one party, one holder record"
+    );
+}
+
+/// `secs` as an RFC 3339 UTC date-time to the second, the
+/// `xsd:dateTime` form VC 1.1 dates take (days-to-civil after Howard
+/// Hinnant's algorithm).
+fn rfc3339(secs: u64) -> String {
+    let days = (secs / 86_400) as i64;
+    let rem = secs % 86_400;
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097);
+    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = doy - (153 * mp + 2) / 5 + 1;
+    let month = if mp < 10 { mp + 3 } else { mp - 9 };
+    let year = yoe + era * 400 + i64::from(month <= 2);
+    format!(
+        "{year:04}-{month:02}-{day:02}T{:02}:{:02}:{:02}Z",
+        rem / 3_600,
+        rem / 60 % 60,
+        rem % 60
+    )
+}
+
+/// 2026-11-01 audit, M3. VC 1.1 requires an `issuanceDate`, which a JWT
+/// credential carries as `nbf` (and `expirationDate` as `exp`); a verifier
+/// that maps the JWT back to a credential finds none without it. Both the
+/// DCP delivery and the OID4VCI credential must carry them.
+#[tokio::test]
+async fn issued_credentials_carry_their_issuance_and_expiration_dates() {
+    assert_eq!(rfc3339(0), "1970-01-01T00:00:00Z");
+    assert_eq!(rfc3339(1_792_017_886), "2026-10-14T22:44:46Z");
+
+    let hub = spawn_hub(HolderApproval::Auto).await;
+    let holder = FakeHolder::spawn("holder").await;
+    let response = hub
+        .request_credentials(&holder, "pid-1", &["membership-credential"])
+        .await;
+    assert_eq!(response.status(), StatusCode::CREATED);
+    hub.wait_for_process_state(&Hub::process_id(&response), "DELIVERED")
+        .await;
+    let delivered = holder.deliveries()[0]["credentials"][0]["payload"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let wallet = FakeHolder::spawn("oid4vci-holder").await;
+    let response = redeem_oid4vci(&hub, &wallet).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let body: Value = response.json().await.unwrap();
+    let redeemed = body["credentials"][0]["credential"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    for (path, jws) in [("DCP", delivered), ("OID4VCI", redeemed)] {
+        let vc = jws_payload(&jws);
+        let iat = vc["iat"].as_u64().unwrap();
+        let exp = vc["exp"].as_u64().unwrap();
+        assert_eq!(
+            vc["nbf"],
+            json!(iat),
+            "{path}: nbf is the issuance date: {vc}"
+        );
+        assert_eq!(
+            vc["vc"]["issuanceDate"],
+            json!(rfc3339(iat)),
+            "{path}: {vc}"
+        );
+        assert_eq!(
+            vc["vc"]["expirationDate"],
+            json!(rfc3339(exp)),
+            "{path}: {vc}"
+        );
+    }
+}
+
 #[tokio::test]
 async fn auto_approval_delivers_immediately() {
     let hub = spawn_hub(HolderApproval::Auto).await;
@@ -1452,4 +1590,149 @@ async fn admin_bearer_scheme_is_case_insensitive() {
             .unwrap();
         assert_eq!(response.status(), StatusCode::OK, "{scheme}");
     }
+}
+
+// ---- OID4VCI issuance under the admin API (2026-10-16 audit, E1) ----
+//
+// A credential issued over OID4VCI used to bypass everything the operator
+// governs: no holder record, no issued-credential record, no
+// `credentialStatus` (irrevocable), and a rejected holder could still
+// redeem an offer. The operator's pre-authorized offer stands in for holder
+// approval (decided 2026-10-17), but the issuance is recorded and
+// revocable like a DCP one, and a rejected holder is refused.
+
+/// Runs the Pre-Authorized Code flow end to end for `holder`'s `did:web`
+/// key: operator offer, token, nonce, credential request.
+async fn redeem_oid4vci(hub: &Hub, holder: &FakeHolder) -> reqwest::Response {
+    use identity_hub_core::oid4vci::{PRE_AUTHORIZED_CODE_GRANT, build_jwt_proof};
+    let config = &hub.state.config;
+    let offer: Value = hub
+        .client
+        .post(format!("{}/oid4vci/offers", hub.public))
+        .basic_auth(&config.sts_client_id, Some(&config.sts_client_secret))
+        .json(&json!({}))
+        .send()
+        .await
+        .expect("offer request completes")
+        .json()
+        .await
+        .expect("offer JSON");
+    let code =
+        offer["credential_offer"]["grants"][PRE_AUTHORIZED_CODE_GRANT]["pre-authorized_code"]
+            .as_str()
+            .expect("pre-authorized code")
+            .to_string();
+    let token: Value = hub
+        .client
+        .post(format!("{}/oid4vci/token", hub.public))
+        .form(&[
+            ("grant_type", PRE_AUTHORIZED_CODE_GRANT),
+            ("pre-authorized_code", code.as_str()),
+        ])
+        .send()
+        .await
+        .expect("token request completes")
+        .json()
+        .await
+        .expect("token JSON");
+    let nonce: Value = hub
+        .client
+        .post(format!("{}/oid4vci/nonce", hub.public))
+        .send()
+        .await
+        .expect("nonce request completes")
+        .json()
+        .await
+        .expect("nonce JSON");
+    let proof = build_jwt_proof(
+        &holder.identity.key_pair,
+        &hub.public,
+        nonce["c_nonce"].as_str(),
+    );
+    hub.client
+        .post(format!("{}/oid4vci/credential", hub.public))
+        .bearer_auth(token["access_token"].as_str().expect("access token"))
+        .json(&json!({
+            "credential_configuration_id": "membership-credential",
+            "proofs": {"jwt": [proof]},
+        }))
+        .send()
+        .await
+        .expect("credential request completes")
+}
+
+#[tokio::test]
+async fn an_oid4vci_credential_is_recorded_and_revocable() {
+    let hub = spawn_hub(HolderApproval::Manual).await;
+    let holder = FakeHolder::spawn("oid4vci-holder").await;
+
+    let response = redeem_oid4vci(&hub, &holder).await;
+    assert_eq!(response.status(), StatusCode::OK, "the offer authorizes it");
+    let body: Value = response.json().await.unwrap();
+    let vc_jws = body["credentials"][0]["credential"].as_str().unwrap();
+    verify_with_issuer_key(&hub, vc_jws);
+    let vc = jws_payload(vc_jws);
+    let credential_id = vc["vc"]["id"].as_str().unwrap().to_string();
+    let entry = &vc["vc"]["credentialStatus"];
+    assert_eq!(entry["type"], json!("StatusList2021Entry"), "{vc}");
+    let index: usize = entry["statusListIndex"].as_str().unwrap().parse().unwrap();
+
+    // The holder is on the operator's list, still pending: the offer
+    // authorized this redemption, not every future DCP request of the DID.
+    let holder_record = holder_by_did(&hub, holder.did()).await;
+    assert_eq!(holder_record["status"], json!("pending"));
+
+    let credentials = hub.query("credentials", json!({})).await;
+    assert_eq!(credentials.len(), 1, "{credentials:?}");
+    let record = &credentials[0];
+    assert_eq!(record["id"], json!(credential_id));
+    assert_eq!(record["holderId"], holder_record["holderId"]);
+    assert_eq!(record["holderDid"], json!(holder.did()));
+    assert_eq!(
+        record["credentialDefinitionId"],
+        json!("membership-credential")
+    );
+    assert_eq!(record["statusListIndex"], json!(index));
+    let process_id = record["issuanceProcessId"].as_str().unwrap();
+    let (status, process) = hub.get(&format!("/issuanceprocesses/{process_id}")).await;
+    assert_eq!(status, StatusCode::OK, "{process}");
+    assert_eq!(process["state"], json!("DELIVERED"));
+
+    assert!(!status_list_bit(&hub, index).await, "not revoked yet");
+    let (status, revoked) = hub
+        .post(
+            &format!("/credentials/{}/revoke", urlencode(&credential_id)),
+            json!({}),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{revoked}");
+    assert!(
+        status_list_bit(&hub, index).await,
+        "revocation reaches the list"
+    );
+}
+
+#[tokio::test]
+async fn a_rejected_holder_cannot_redeem_an_oid4vci_offer() {
+    let hub = spawn_hub(HolderApproval::Auto).await;
+    let holder = FakeHolder::spawn("rejected-oid4vci-holder").await;
+    assert_eq!(redeem_oid4vci(&hub, &holder).await.status(), StatusCode::OK);
+    let holder_id = holder_by_did(&hub, holder.did()).await["holderId"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let (status, _) = hub
+        .post(&format!("/holders/{holder_id}/reject"), json!({}))
+        .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let refused = redeem_oid4vci(&hub, &holder).await;
+    assert_eq!(refused.status(), StatusCode::BAD_REQUEST);
+    let error: Value = refused.json().await.unwrap();
+    assert_eq!(
+        error["error"],
+        json!("credential_request_denied"),
+        "{error}"
+    );
+    assert_eq!(hub.query("credentials", json!({})).await.len(), 1);
 }

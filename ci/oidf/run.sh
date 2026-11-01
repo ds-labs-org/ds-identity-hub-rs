@@ -57,6 +57,7 @@ echo "==> Starting the hub as an OID4VCI wallet"
     --did-host "host.docker.internal:${HUB_PORT}" \
     --allow-resolve-host localhost.emobix.co.uk \
     --oid4vci-client-id "$CLIENT_ID" \
+    --sts-client-secret "$(openssl rand -hex 16)" \
     --oid4vci-offer-endpoint \
     --oid4vci-offer-tx-code "$TX_CODE" \
     --extra-root-cert "$OIDF_CERT_DIR/ca.crt" \

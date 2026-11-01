@@ -29,8 +29,8 @@ use crate::issuer::{
 use crate::registry_trust::{check_issuer, registry_configured};
 use crate::state::AppState;
 use crate::validation::{
-    ValidationError, check_known_holder_pid, validate_offer_credentials, validate_status,
-    verify_credential_proofs,
+    ValidationError, check_credential_claims, check_known_holder_pid, is_within_validity,
+    validate_offer_credentials, validate_status, verify_credential_proofs,
 };
 
 pub fn router(state: Arc<AppState>) -> Router {
@@ -250,7 +250,7 @@ async fn presentation_query(
         .into_iter()
         .filter(|t| allowed_types.contains(t))
         .collect();
-    let matched = state.store.credentials_of_types(&effective_types);
+    let matched = presentable(state.store.credentials_of_types(&effective_types));
     let vp_jws = build_presentation(&state, caller_did, &matched);
 
     Json(PresentationResponseMessage::new(vec![vp_jws])).into_response()
@@ -296,21 +296,31 @@ async fn granted_credential_types(
     let Some(nested_token) = claims.get("token").and_then(Value::as_str) else {
         return Ok(Vec::new());
     };
-    let nested_payload = verify_nested_access_token(
-        &state.http,
-        nested_token,
-        outer_sub,
-        state.sts_party.own_did(),
-        state.config.insecure_http,
-        &state.outbound,
-    )
-    .await?;
+    let nested_payload = verify_nested_access_token(nested_token, outer_sub, &state.sts_party)?;
     let granted_scope = nested_payload
         .get("scope")
         .and_then(Value::as_str)
         .unwrap_or("");
     let granted_scopes = identity_hub_core::scope::split_scope_string(granted_scope);
     Ok(state.scope_matcher.credential_types(&granted_scopes))
+}
+
+/// Leaves out of a presentation what a verifier must refuse anyway
+/// (2026-10-16 project audit, E2): a JWT credential outside its validity
+/// window, and a credential already included (stored twice).
+fn presentable(credentials: Vec<CredentialContainer>) -> Vec<CredentialContainer> {
+    let now = now_secs();
+    let mut seen = std::collections::HashSet::new();
+    credentials
+        .into_iter()
+        .filter(|c| seen.insert(c.payload.to_string()))
+        .filter(|c| {
+            c.payload
+                .as_str()
+                .and_then(|jws| dcp_core::decode_jws_unverified(jws).ok())
+                .is_none_or(|(_, _, payload)| is_within_validity(&payload, now))
+        })
+        .collect()
 }
 
 fn build_presentation(
@@ -372,9 +382,13 @@ fn build_presentation(
 /// Once the token envelope and issuer are both trusted, the message *body*
 /// itself is validated too (`crate::validation`, added 2026-09-20): `status`
 /// must be a recognized value, `holderPid` must be one this service was
-/// configured to expect (`Config::known_holder_pids`), and every JWT-format
-/// embedded credential's own proof must genuinely verify - see
-/// `crate::validation`'s module doc comment for exactly what each closes.
+/// configured to expect (`Config::known_holder_pids`), every JWT-format
+/// embedded credential's own proof must genuinely verify, and (2026-10-16
+/// audit, E2) each credential must come from a trusted issuer (the registry
+/// for its type when one is configured, else the static list), be bound to
+/// this service's own DID and be inside its validity window
+/// (`validation::check_credential_claims`) - see `crate::validation`'s
+/// module doc comment for exactly what each closes.
 async fn storage_write(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -419,8 +433,10 @@ async fn storage_write(
     }
     // With a registry, each credential's own issuer must be trusted for its
     // type too, not only the caller delivering it: the registry says who
-    // may issue what. (The static list only ever named callers.)
-    if registry_configured(&state) {
+    // may issue what. Without one, `check_credential_claims` holds each
+    // credential's issuer to the static list.
+    let registry = registry_configured(&state);
+    if registry {
         for container in &message.credentials {
             let Some(vc_issuer) = credential_issuer(container) else {
                 return auth_error_response(AuthError::UntrustedIssuer(String::new()));
@@ -430,6 +446,14 @@ async fn storage_write(
                 return auth_error_response(err);
             }
         }
+    }
+    if let Err(err) = check_credential_claims(
+        &message.credentials,
+        state.identity.own_did(),
+        (!registry).then_some(state.config.trusted_issuer_dids.as_slice()),
+        now_secs(),
+    ) {
+        return validation_error_response(err);
     }
     state.store.store(StoredCredentialBatch {
         issuer_pid: message.issuer_pid,
@@ -941,9 +965,14 @@ pub(crate) fn status_list_url(state: &AppState) -> String {
 /// protocol it asked through.
 ///
 /// With `status_index`, the VC carries a `StatusList2021Entry` pointing at
-/// that bit of [`status_list_url`]. DCP deliveries always pass one (they
-/// get an issued-credential record the admin API can revoke); OID4VCI
-/// issuance passes `None`, since nothing records it for revocation.
+/// that bit of [`status_list_url`]. Both protocols pass one, and record an
+/// issued-credential entry the admin API can revoke (OID4VCI since the
+/// 2026-10-16 audit, E1: see `oid4vci::record_and_mint`).
+///
+/// The issuance date is `nbf` and the expiration date `exp`, as VC 1.1's
+/// JWT encoding maps them, and the `vc` object repeats both as
+/// `issuanceDate`/`expirationDate` for verifiers that read it alone
+/// (2026-11-01 audit, M3: VC 1.1 requires an `issuanceDate`).
 pub(crate) fn mint_credential(
     state: &AppState,
     definition: &CredentialDefinition,
@@ -958,6 +987,8 @@ pub(crate) fn mint_credential(
         "id": id,
         "type": ["VerifiableCredential", definition.credential_type],
         "issuer": state.identity.own_did(),
+        "issuanceDate": xsd_date_time(issued_at),
+        "expirationDate": xsd_date_time(expires_at),
         "credentialSubject": { "id": holder_did },
     });
     if let Some(index) = status_index {
@@ -976,6 +1007,7 @@ pub(crate) fn mint_credential(
         "sub": holder_did,
         "vc": vc,
         "iat": issued_at,
+        "nbf": issued_at,
         "exp": expires_at,
         "jti": id,
     });
@@ -990,6 +1022,17 @@ pub(crate) fn mint_credential(
         issued_at,
         expires_at,
     }
+}
+
+/// `secs` (Unix time) as an RFC 3339 UTC date-time to the second, the
+/// `xsd:dateTime` form of VC 1.1 dates. A date past chrono's range (a
+/// definition `validity` of more than 260,000 years) is clamped to its end.
+fn xsd_date_time(secs: u64) -> String {
+    i64::try_from(secs)
+        .ok()
+        .and_then(|secs| chrono::DateTime::from_timestamp(secs, 0))
+        .unwrap_or(chrono::DateTime::<chrono::Utc>::MAX_UTC)
+        .to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
 }
 
 /// `GET /requests/<id>` (Credential Request Status API). See

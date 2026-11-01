@@ -368,3 +368,79 @@ async fn a_token_from_this_hubs_own_sts_is_accepted_by_its_own_presentation_api(
          presentation must actually carry it"
     );
 }
+
+/// RED - **2026-10-16 audit, E5**. The nested access token a verifier
+/// forwards was minted by this hub's own STS, whose key this process holds,
+/// yet the Presentation API fetches `state.sts_party`'s DID document over
+/// HTTP to verify it. That party lives at `127.0.0.1:<bind port>`, so with
+/// `--insecure-http false` the fetch goes to `https://127.0.0.1:<port>/`,
+/// which no listener serves (this hub has no TLS listener): every DCP
+/// presentation fails in the secure mode. Here the hub's own router counts
+/// the fetches; the TCK's own flow (a verifier wrapping the STS's nested
+/// token in its own envelope) must succeed without one.
+#[tokio::test]
+async fn a_nested_token_from_this_hubs_own_sts_is_verified_without_fetching_its_did_document() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind an ephemeral loopback port for the credential service under test");
+    let addr = listener.local_addr().expect("local addr");
+    let config = Config::for_test(
+        Mode::CredentialService,
+        addr,
+        format!("127.0.0.1:{}", addr.port()),
+    );
+    let (state, router) = identity_hub_http::build(config);
+    let fetches = Arc::new(AtomicUsize::new(0));
+    let counter = Arc::clone(&fetches);
+    let router = router.layer(axum::middleware::from_fn(
+        move |request: axum::extract::Request, next: axum::middleware::Next| {
+            let counter = Arc::clone(&counter);
+            async move {
+                if request.uri().path() == "/sts-party/did.json" {
+                    counter.fetch_add(1, Ordering::SeqCst);
+                }
+                next.run(request).await
+            }
+        },
+    ));
+    tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+    let base = format!("http://{addr}");
+    seed_membership_credential(&state);
+
+    let verifier = spawn_identity("verifier").await;
+    let sts: Value = reqwest::Client::new()
+        .post(format!("{base}/sts/token"))
+        .form(&[
+            ("grant_type", "client_credentials"),
+            ("client_id", state.config.sts_client_id.as_str()),
+            ("client_secret", state.config.sts_client_secret.as_str()),
+            ("audience", verifier.own_did()),
+            ("bearer_access_scope", MEMBERSHIP_SCOPE),
+        ])
+        .send()
+        .await
+        .expect("sts token request completes")
+        .json()
+        .await
+        .expect("sts response is JSON");
+    let si_token = sts["access_token"].as_str().expect("access_token");
+    let (_, _, si_claims) = dcp_core::decode_jws_unverified(si_token).expect("valid JWS");
+    let nested = si_claims["token"].as_str().expect("nested access token");
+
+    let outer = mint_outer_envelope(&verifier, state.identity.own_did(), Some(nested));
+    let response = query(&base, &outer).await;
+    assert_eq!(response.status(), reqwest::StatusCode::OK);
+    assert_eq!(
+        returned_markers(response).await,
+        vec![MEMBERSHIP_MARKER.to_string()]
+    );
+    assert_eq!(
+        fetches.load(Ordering::SeqCst),
+        0,
+        "the hub fetched its own STS party's DID document over HTTP to verify a token it \
+         signed itself - with --insecure-http false that is https://127.0.0.1:<port>/, which \
+         nothing serves"
+    );
+}

@@ -22,6 +22,8 @@ use dcp_core::{
 };
 use serde_json::Value;
 
+use identity_hub_core::identity::ServiceIdentity;
+
 use crate::outbound::OutboundPolicy;
 use crate::state::SeenJtiCache;
 
@@ -240,17 +242,16 @@ pub fn check_trusted_issuer(
 /// audit's Finding 2 (CRITICAL).
 ///
 /// Concretely:
-/// - the nested token's own `iss` must equal `authoritative_issuer` (this
-///   service's own STS party DID - the only party this bootstrap's
+/// - the nested token's own `iss` must equal `authority`'s DID (this
+///   service's own STS party - the only party this bootstrap's
 ///   Presentation API recognizes as able to grant reads of its own store,
-///   see `handlers::granted_credential_types`'s call site for why). This is
-///   checked *before* `resolve_did` so an attacker-controlled DID is never
-///   fetched at all for a token that could never have been authoritative in
-///   the first place.
-/// - the nested token's own signature verifies against its own resolved
-///   `did:web` issuer (the same `resolve_did`/`find_verifying_key`/
-///   `verify_jws_signature` primitives `verify_bearer_token` already uses for
-///   the outer envelope);
+///   see `handlers::granted_credential_types`'s call site for why), so no
+///   other party's token is ever looked at further;
+/// - its `kid` is `authority`'s own key and its signature verifies against
+///   that key, which this process holds: no DID document is fetched
+///   (2026-10-16 audit, E5 - the STS party lives at `127.0.0.1:<bind port>`,
+///   so resolving it with `--insecure-http false` went to an
+///   `https://127.0.0.1` nothing serves, and every presentation failed);
 /// - it has not expired;
 /// - and - the confused-deputy fix, closing `cs_04_03_03_idTokenInvalidIssuerSub` -
 ///   its own `aud` claim equals `outer_sub` (the outer envelope's own
@@ -268,13 +269,10 @@ pub fn check_trusted_issuer(
 /// genuinely authenticated and authorized, not best-effort-decoded (see
 /// `cs_05_04_invalidTokenNotAuthorized`, whose nested token, `"faketoken"`,
 /// isn't even a real JWS).
-pub async fn verify_nested_access_token(
-    http: &reqwest::Client,
+pub fn verify_nested_access_token(
     nested_token: &str,
     outer_sub: &str,
-    authoritative_issuer: &str,
-    insecure_http: bool,
-    outbound: &OutboundPolicy,
+    authority: &ServiceIdentity,
 ) -> Result<Value, AuthError> {
     let (_, header, payload) = decode_jws_unverified(nested_token)
         .map_err(|e| AuthError::InvalidNestedToken(e.to_string()))?;
@@ -285,25 +283,17 @@ pub async fn verify_nested_access_token(
         AuthError::InvalidNestedToken("nested token has no kid header".to_string())
     })?;
 
-    if nested_iss != authoritative_issuer {
+    if nested_iss != authority.own_did() {
         return Err(AuthError::NestedTokenIssuerNotAuthoritative(
             nested_iss.to_string(),
         ));
     }
-
-    // Defence in depth (the authoritative-issuer check above already
-    // narrows `nested_iss` to exactly `authoritative_issuer`, so this can
-    // only ever reject when that party's own host somehow isn't
-    // allow-listed) - checked before `resolve_did`, mirroring
-    // `verify_bearer_token`'s own ordering.
-    outbound
-        .check_did(nested_iss, insecure_http)
-        .map_err(|e| AuthError::OutboundDestinationNotAllowed(e.to_string()))?;
-
-    let issuer_doc = resolve_did(http, nested_iss, insecure_http)
-        .await
-        .map_err(AuthError::DidResolution)?;
-    let issuer_key = find_verifying_key(&issuer_doc, kid).map_err(AuthError::InvalidNestedToken)?;
+    if kid != authority.own_key_id() {
+        return Err(AuthError::InvalidNestedToken(format!(
+            "nested token kid '{kid}' is not the key of '{nested_iss}'"
+        )));
+    }
+    let issuer_key = *authority.key_pair.signing_key().verifying_key();
     verify_jws_signature(nested_token, &issuer_key).map_err(AuthError::InvalidNestedToken)?;
 
     let exp = payload.get("exp").and_then(Value::as_u64).unwrap_or(0);

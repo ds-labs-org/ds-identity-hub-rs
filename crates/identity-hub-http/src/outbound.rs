@@ -35,7 +35,9 @@ pub enum OutboundError {
 /// matching rule, and each call site (`auth::verify_bearer_token`,
 /// `auth::verify_nested_access_token`, `handlers::try_deliver_issued_credential`,
 /// `validation::verify_credential_proofs`,
-/// `validation::validate_offer_credentials`) for where.
+/// `validation::validate_offer_credentials`) for where. The shared client's
+/// redirect policy (`state::redirect_policy`) re-checks every redirect hop.
+#[derive(Clone)]
 pub struct OutboundPolicy {
     allowed_hosts: Vec<String>,
 }

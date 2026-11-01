@@ -40,6 +40,7 @@ use serde_json::{Value, json};
 use uuid::Uuid;
 
 use dcp_core::now_secs;
+use identity_hub_core::sts::constant_time_eq;
 
 use crate::handlers::spawn_delivery;
 use crate::issuer::{
@@ -165,14 +166,6 @@ fn run_query(body: &[u8], items: Vec<Value>) -> Response {
         Ok(page) => Json(page).into_response(),
         Err(message) => error(StatusCode::BAD_REQUEST, message),
     }
-}
-
-/// Byte-wise comparison whose running time does not depend on *where* the
-/// first difference is, so the token cannot be recovered one byte at a time
-/// from response timing. (The length still shows; a token's length is not
-/// the secret.)
-fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
-    a.len() == b.len() && a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
 }
 
 async fn require_admin_token(

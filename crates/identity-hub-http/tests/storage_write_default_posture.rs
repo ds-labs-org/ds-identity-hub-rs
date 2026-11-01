@@ -104,7 +104,14 @@ async fn spawn_default_config_binary() -> (ChildGuard, String, String) {
     drop(probe);
 
     let child = Command::new(env!("CARGO_BIN_EXE_identity-hub"))
-        .args(["credential-service", "--bind", &format!("127.0.0.1:{port}")])
+        .args([
+            "credential-service",
+            "--bind",
+            &format!("127.0.0.1:{port}"),
+            // The one flag with no default (2026-10-16 audit, C1).
+            "--sts-client-secret",
+            "test-secret",
+        ])
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .spawn()
@@ -213,17 +220,22 @@ fn bearer_token(caller: &ServiceIdentity, aud: &str) -> String {
 /// `did:web` document - the shape this service can actually check. `format`
 /// is passed in so the guards below can pin both this bootstrap's own label
 /// (`"jwt"`) and the real TCK's (`"VC1_0_JWT"`).
+/// The DID of the in-process Credential Service (`did_host`
+/// `localhost:0`), which a stored credential must be bound to (2026-10-16
+/// audit, E2).
+const SERVICE_DID: &str = "did:web:localhost%3A0:credential-service";
+
 fn verifiable_credential_container(issuer: &ServiceIdentity, format: &str) -> Value {
     let now = dcp_core::now_secs();
     let jws = sign(
         issuer,
         json!({
             "iss": issuer.own_did(),
-            "sub": issuer.own_did(),
+            "sub": SERVICE_DID,
             "vc": {
                 "@context": ["https://www.w3.org/2018/credentials/v1"],
                 "type": ["VerifiableCredential", "MembershipCredential"],
-                "credentialSubject": {"id": issuer.own_did()},
+                "credentialSubject": {"id": SERVICE_DID},
             },
             "iat": now,
             "nbf": now,
