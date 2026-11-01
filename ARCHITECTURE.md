@@ -752,6 +752,10 @@ including the first (wrong) fixes tried along the way).
     allow-list entirely — this bootstrap's own STS-party placement is the
     thing keeping it there, exactly the same shape of trade-off "A real
     networking gotcha" above documents for `host.docker.internal`.
+    The Presentation API no longer resolves `sts_party` itself: a nested
+    access token is verified against the STS party's key in memory
+    (2026-10-16 audit, E5; resolving it with `--insecure-http false`
+    went to an `https://127.0.0.1` nothing serves).
   - **TCK-safety was verified by running the real TCK repeatedly while
     building this, not just once at the end** — the actual regression risk
     this change carries is disagreeing with the TCK's own real resolution

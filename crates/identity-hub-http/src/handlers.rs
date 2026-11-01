@@ -296,15 +296,7 @@ async fn granted_credential_types(
     let Some(nested_token) = claims.get("token").and_then(Value::as_str) else {
         return Ok(Vec::new());
     };
-    let nested_payload = verify_nested_access_token(
-        &state.http,
-        nested_token,
-        outer_sub,
-        state.sts_party.own_did(),
-        state.config.insecure_http,
-        &state.outbound,
-    )
-    .await?;
+    let nested_payload = verify_nested_access_token(nested_token, outer_sub, &state.sts_party)?;
     let granted_scope = nested_payload
         .get("scope")
         .and_then(Value::as_str)
