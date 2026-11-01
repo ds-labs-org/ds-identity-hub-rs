@@ -182,6 +182,18 @@ impl Hub {
         holder_pid: &str,
         definition_ids: &[&str],
     ) -> reqwest::Response {
+        self.request_credentials_as(holder, holder.did(), holder_pid, definition_ids)
+            .await
+    }
+
+    /// [`Hub::request_credentials`] with `iss` and `sub` spelled as `did`.
+    async fn request_credentials_as(
+        &self,
+        holder: &FakeHolder,
+        did: &str,
+        holder_pid: &str,
+        definition_ids: &[&str],
+    ) -> reqwest::Response {
         let body = json!({
             "@context": ["https://w3id.org/dspace-dcp/v1.0/dcp.jsonld"],
             "type": "CredentialRequestMessage",
@@ -190,7 +202,7 @@ impl Hub {
         });
         self.client
             .post(format!("{}/credentials", self.public))
-            .bearer_auth(holder.token(&self.issuer_did()))
+            .bearer_auth(holder.token_as(did, &self.issuer_did()))
             .json(&body)
             .send()
             .await
@@ -289,11 +301,17 @@ impl FakeHolder {
     }
 
     fn token(&self, aud: &str) -> String {
+        self.token_as(self.did(), aud)
+    }
+
+    /// A Self-Issued ID Token signed with this holder's key whose `iss` and
+    /// `sub` are `did`.
+    fn token_as(&self, did: &str, aud: &str) -> String {
         let now = dcp_core::now_secs();
         dcp_core::sign_jws(
             &json!({
-                "iss": self.did(),
-                "sub": self.did(),
+                "iss": did,
+                "sub": did,
                 "aud": aud,
                 "iat": now,
                 "nbf": now,
@@ -1129,6 +1147,54 @@ async fn rejected_holders_are_refused() {
     tokio::time::sleep(Duration::from_millis(200)).await;
     assert!(holder.deliveries().is_empty());
     assert!(hub.query("credentials", json!({})).await.is_empty());
+}
+
+/// 2026-11-01 audit, M2. did:web resolution reads `%3a` as `%3A`, so both
+/// spellings name the same DID document and the same key. The holder
+/// registry must treat them as one holder, or a rejected holder gets back in
+/// by respelling its own DID, and the operator can register one party twice.
+#[tokio::test]
+async fn a_rejected_holder_stays_rejected_under_another_spelling_of_its_did() {
+    let hub = spawn_hub(HolderApproval::Auto).await;
+    let holder = FakeHolder::spawn("holder").await;
+
+    let response = hub
+        .request_credentials(&holder, "pid-1", &["membership-credential"])
+        .await;
+    assert_eq!(response.status(), StatusCode::CREATED);
+    let holder_id = holder_by_did(&hub, holder.did()).await["holderId"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let (status, _) = hub
+        .post(&format!("/holders/{holder_id}/reject"), json!({}))
+        .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let respelled = holder.did().replace("%3A", "%3a");
+    assert_ne!(respelled, holder.did());
+    let response = hub
+        .request_credentials_as(&holder, &respelled, "pid-2", &["membership-credential"])
+        .await;
+    assert_eq!(
+        response.status(),
+        StatusCode::FORBIDDEN,
+        "{respelled} resolves to the rejected holder's own DID document"
+    );
+
+    let (status, body) = hub
+        .post("/holders", json!({"did": respelled.clone()}))
+        .await;
+    assert_eq!(
+        status,
+        StatusCode::CONFLICT,
+        "{respelled} is already registered under another spelling: {body}"
+    );
+    assert_eq!(
+        hub.query("holders", json!({})).await.len(),
+        1,
+        "one party, one holder record"
+    );
 }
 
 #[tokio::test]
