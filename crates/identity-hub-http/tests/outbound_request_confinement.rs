@@ -349,3 +349,56 @@ async fn did_resolution_gives_up_on_a_host_that_never_responds() {
         "a DID that cannot be resolved must be rejected, not waited on"
     );
 }
+
+/// RED - **2026-10-16 audit, M1**. The allow-list is checked on the URL a
+/// request *starts* at, but the shared `reqwest` client follows redirects by
+/// default, so an allow-listed host can bounce this service anywhere. Here
+/// the caller's DID document is served from `127.0.0.1` (allow-listed), and
+/// that server answers with a `302` to `127.0.0.2:<ephemeral>`, a host no
+/// part of this service's configuration names. Every hop must be held to the
+/// same allow-list as the first.
+#[tokio::test]
+async fn did_resolution_does_not_follow_a_redirect_to_an_unconfigured_host() {
+    use axum::http::{StatusCode, header};
+    use axum::response::IntoResponse;
+    use axum::routing::get;
+
+    let (state, base) = spawn_service(Mode::CredentialService).await;
+    let (probe_host, probe_hits) = spawn_probe("127.0.0.2").await;
+
+    let redirector = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind an ephemeral loopback port for the redirecting DID server");
+    let redirector_addr = redirector
+        .local_addr()
+        .expect("bound listener has a local address");
+    let location = format!("http://{probe_host}/attacker/did.json");
+    let redirect_app = axum::Router::new().route(
+        "/attacker/did.json",
+        get(move || {
+            let location = location.clone();
+            async move { (StatusCode::FOUND, [(header::LOCATION, location)]).into_response() }
+        }),
+    );
+    tokio::spawn(async move {
+        axum::serve(redirector, redirect_app)
+            .await
+            .expect("redirecting DID server");
+    });
+
+    let attacker =
+        ServiceIdentity::new(&format!("127.0.0.1:{}", redirector_addr.port()), "attacker");
+    let outer = mint_outer_envelope(&attacker, state.identity.own_did());
+
+    let response = query(&base, &outer).await;
+    assert!(
+        response.status().is_client_error(),
+        "a token whose issuer's DID document cannot be fetched must be rejected"
+    );
+    assert_eq!(
+        probe_hits.load(Ordering::SeqCst),
+        0,
+        "a redirect from an allow-listed host led this service to {probe_host}, a host no part \
+         of its configuration ever named - every redirect hop must pass the allow-list"
+    );
+}
