@@ -59,8 +59,10 @@ const CLOCK_SKEW_SECS: u64 = 60;
 
 /// What a JWT-format credential delivered to the Storage API says about
 /// itself, checked after [`verify_credential_proofs`] has verified its
-/// signature (2026-10-16 project audit, E2): its issuer (`iss`) must be a
-/// trusted issuer, it must be bound to this Credential Service's own DID
+/// signature (2026-10-16 project audit, E2): its issuer (`iss`) must be on
+/// `trusted_issuer_dids` (`None` when a trusted issuers registry checks
+/// each credential's issuer instead), it must be bound to this Credential
+/// Service's own DID
 /// (`sub`, or `vc.credentialSubject.id` when there is no `sub`), and `now`
 /// must be inside its validity window (`nbf`, `exp`, when present). Before
 /// this, a trusted deliverer could store a credential signed by anybody,
@@ -69,7 +71,7 @@ const CLOCK_SKEW_SECS: u64 = 60;
 pub fn check_credential_claims(
     credentials: &[CredentialContainer],
     own_did: &str,
-    trusted_issuer_dids: &[String],
+    trusted_issuer_dids: Option<&[String]>,
     now: u64,
 ) -> Result<(), ValidationError> {
     for container in credentials {
@@ -81,7 +83,9 @@ pub fn check_credential_claims(
         let (_, _, payload) =
             dcp_core::decode_jws_unverified(jws).map_err(ValidationError::UnverifiableProof)?;
         let issuer = payload.get("iss").and_then(Value::as_str).unwrap_or("");
-        if !trusted_issuer_dids.iter().any(|trusted| trusted == issuer) {
+        if let Some(trusted) = trusted_issuer_dids
+            && !trusted.iter().any(|t| t == issuer)
+        {
             return Err(ValidationError::UntrustedCredentialIssuer(
                 issuer.to_string(),
             ));

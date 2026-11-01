@@ -9,6 +9,7 @@ mod handlers;
 pub mod issuer;
 pub mod oid4vci;
 pub mod outbound;
+pub mod registry_trust;
 pub mod state;
 pub mod validation;
 
