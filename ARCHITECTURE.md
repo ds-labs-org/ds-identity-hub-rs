@@ -702,6 +702,11 @@ including the first (wrong) fixes tried along the way).
     loopback ports, and the real TCK's own published port varies between
     runs — host:port matching would reject those legitimate destinations
     right along with a real one.
+  - **Redirects.** The shared `reqwest::Client` follows redirects only
+    when each hop passes the same `check_url`
+    (`state::redirect_policy`, at most 10 hops); `reqwest`'s default
+    policy would follow a `302` from an allow-listed host to any host
+    (2026-11-01 audit, M1).
   - **Where the allow-list comes from — a single source of truth.**
     `AppState::new` (`src/state.rs`) builds the one `OutboundPolicy` this
     process ever consults, from exactly: the host part of `config.did_host`
