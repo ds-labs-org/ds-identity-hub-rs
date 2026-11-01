@@ -32,6 +32,7 @@ regex = { workspace = true }
 clap = { workspace = true }
 base64 = { workspace = true }
 flate2 = { workspace = true }
+chrono = { workspace = true }
 
 [features]
 # Trusting issuers through the dataspace's trusted issuers registry

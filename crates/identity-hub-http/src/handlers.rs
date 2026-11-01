@@ -976,6 +976,11 @@ pub(crate) fn status_list_url(state: &AppState) -> String {
 /// that bit of [`status_list_url`]. Both protocols pass one, and record an
 /// issued-credential entry the admin API can revoke (OID4VCI since the
 /// 2026-10-16 audit, E1: see `oid4vci::record_and_mint`).
+///
+/// The issuance date is `nbf` and the expiration date `exp`, as VC 1.1's
+/// JWT encoding maps them, and the `vc` object repeats both as
+/// `issuanceDate`/`expirationDate` for verifiers that read it alone
+/// (2026-11-01 audit, M3: VC 1.1 requires an `issuanceDate`).
 pub(crate) fn mint_credential(
     state: &AppState,
     definition: &CredentialDefinition,
@@ -990,6 +995,8 @@ pub(crate) fn mint_credential(
         "id": id,
         "type": ["VerifiableCredential", definition.credential_type],
         "issuer": state.identity.own_did(),
+        "issuanceDate": xsd_date_time(issued_at),
+        "expirationDate": xsd_date_time(expires_at),
         "credentialSubject": { "id": holder_did },
     });
     if let Some(index) = status_index {
@@ -1008,6 +1015,7 @@ pub(crate) fn mint_credential(
         "sub": holder_did,
         "vc": vc,
         "iat": issued_at,
+        "nbf": issued_at,
         "exp": expires_at,
         "jti": id,
     });
@@ -1022,6 +1030,17 @@ pub(crate) fn mint_credential(
         issued_at,
         expires_at,
     }
+}
+
+/// `secs` (Unix time) as an RFC 3339 UTC date-time to the second, the
+/// `xsd:dateTime` form of VC 1.1 dates. A date past chrono's range (a
+/// definition `validity` of more than 260,000 years) is clamped to its end.
+fn xsd_date_time(secs: u64) -> String {
+    i64::try_from(secs)
+        .ok()
+        .and_then(|secs| chrono::DateTime::from_timestamp(secs, 0))
+        .unwrap_or(chrono::DateTime::<chrono::Utc>::MAX_UTC)
+        .to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
 }
 
 /// `GET /requests/<id>` (Credential Request Status API). See
